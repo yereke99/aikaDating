@@ -1,0 +1,27 @@
+services:
+  aikabot:
+    build: .
+    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      PORT: 8080
+      DATABASE_PATH: /app/data/aikabot.db
+      PROFILE_PHOTO_DIR: /profile_photo
+      WEB_DIR: /app/web
+      BOT_TOKEN: ${BOT_TOKEN:?set BOT_TOKEN in .env}
+      BOT_USERNAME: ${BOT_USERNAME:?set BOT_USERNAME in .env}
+      MINI_APP_URL: ${MINI_APP_URL:?set MINI_APP_URL in .env}
+      MINI_APP_ORIGIN: ${MINI_APP_ORIGIN:-${MINI_APP_URL}}
+      ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS:-}
+      AUTH_MAX_AGE: ${AUTH_MAX_AGE:-24h}
+      LIKE_RATE_PER_MINUTE: ${LIKE_RATE_PER_MINUTE:-5}
+      LOCAL_DEV: "false"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - aika_data:/app/data
+      - aika_profile_photos:/profile_photo
+
+volumes:
+  aika_data:
+  aika_profile_photos:

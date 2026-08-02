@@ -1,0 +1,14 @@
+.env
+.tools/
+.tmp/
+data/
+profile_photo/
+*.db
+*.db-shm
+*.db-wal
+web/node_modules/
+web/dist/
+coverage.out
+*.tsbuildinfo
+*.log
+.DS_Store
