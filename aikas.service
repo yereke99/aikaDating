@@ -1,0 +1,24 @@
+[Unit]
+Description=Aika Dating Telegram bot and Mini App
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/home/aikaDating/.env
+ConditionPathExists=/root/.nvm/nvm.sh
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/aikaDating
+ExecStart=/bin/bash -lc ". /root/.nvm/nvm.sh && nvm use 22 >/dev/null && exec /usr/bin/make run"
+Restart=always
+RestartSec=5s
+KillSignal=SIGINT
+TimeoutStopSec=30s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aikas
+
+[Install]
+WantedBy=multi-user.target

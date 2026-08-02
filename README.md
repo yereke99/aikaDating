@@ -200,6 +200,27 @@ Admin authorization is determined only from the verified Telegram ID and `ADMIN_
 
 The container runs as an unprivileged user, serves the prebuilt Mini App, stores SQLite at `/app/data/aikabot.db`, persists normalized images in the `aika_profile_photos` volume mounted at `/profile_photo`, and has a health check. Only the reverse proxy should be publicly exposed.
 
+### systemd service on `/home/aikaDating`
+
+The included `aikas.service` runs `make run` with Node.js 22 from root's nvm installation, keeps the process in the background, restarts it after failures, and sends output to the system journal. Stop any foreground `make run` first so port `8089` is free, then install the unit as root:
+
+```bash
+cd /home/aikaDating
+cp aikas.service /etc/systemd/system/aikas.service
+systemctl daemon-reload
+systemctl enable --now aikas.service
+systemctl status aikas.service --no-pager
+```
+
+Follow logs and restart after configuration changes with:
+
+```bash
+journalctl -u aikas.service -f
+systemctl restart aikas.service
+```
+
+The unit assumes nvm is installed at `/root/.nvm` and the repository is located at `/home/aikaDating`.
+
 ## Tests and builds
 
 ```bash
