@@ -16,7 +16,14 @@ SQLite `INTEGER` is a signed 64-bit value, so both `telegram_user_id` and `teleg
 
 ## Local development
 
-Requirements: Go 1.25+, Node.js 24+, and npm.
+Requirements: Go 1.25+, Node.js 22.12+ (Node.js 22 LTS recommended), and npm.
+
+With `nvm`, select the repository's Node.js version before installing frontend dependencies:
+
+```bash
+nvm install
+nvm use
+```
 
 ```bash
 cp .env.example .env
