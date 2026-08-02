@@ -670,7 +670,10 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(self), microphone=(), geolocation=(self)")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org")
+		// blob: is required by the profile photo picker: the Mini App decodes the chosen file and
+		// re-encodes it to JPEG in a canvas before upload, and that decode step loads a blob: URL.
+		// Without it the browser blocks the image load and the upload never starts.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org")
 		next.ServeHTTP(w, r)
 	})
 }

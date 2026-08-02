@@ -66,8 +66,26 @@ function validateStep(step: number, form: ProfileInput, photo?: string): Message
   return ''
 }
 
-async function normalizeProfilePhoto(file: File): Promise<Blob> {
-  if (!file.type.startsWith('image/')) throw new Error('invalid_photo')
+interface DecodedImage {
+  source: CanvasImageSource
+  width: number
+  height: number
+  release: () => void
+}
+
+/**
+ * createImageBitmap decodes the File directly, with no blob: URL and therefore no dependency on
+ * the page's img-src policy. The <img> path stays as the fallback for clients without it.
+ */
+async function decodeImage(file: File): Promise<DecodedImage> {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(file)
+      return { source: bitmap, width: bitmap.width, height: bitmap.height, release: () => bitmap.close() }
+    } catch {
+      /* unsupported source format; retry through the element decoder below */
+    }
+  }
   const objectURL = URL.createObjectURL(file)
   try {
     const image = new Image()
@@ -76,19 +94,33 @@ async function normalizeProfilePhoto(file: File): Promise<Blob> {
       image.onerror = () => reject(new Error('invalid_photo'))
       image.src = objectURL
     })
+    return { source: image, width: image.naturalWidth, height: image.naturalHeight, release: () => URL.revokeObjectURL(objectURL) }
+  } catch (error) {
+    URL.revokeObjectURL(objectURL)
+    throw error
+  }
+}
+
+async function normalizeProfilePhoto(file: File): Promise<Blob> {
+  // Some Android gallery pickers hand over a file with an empty type; let the decoder judge those
+  // rather than rejecting a perfectly valid image on a missing MIME string.
+  if (file.type && !file.type.startsWith('image/')) throw new Error('invalid_photo')
+  const decoded = await decodeImage(file)
+  try {
     const maxSide = 1600
-    const scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight))
+    const scale = Math.min(1, maxSide / Math.max(decoded.width, decoded.height))
     const canvas = document.createElement('canvas')
-    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
-    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
+    canvas.width = Math.max(1, Math.round(decoded.width * scale))
+    canvas.height = Math.max(1, Math.round(decoded.height * scale))
     const context = canvas.getContext('2d')
     if (!context) throw new Error('invalid_photo')
-    context.drawImage(image, 0, 0, canvas.width, canvas.height)
+    context.drawImage(decoded.source, 0, 0, canvas.width, canvas.height)
+    // The server only accepts JPEG or PNG, so the canvas re-encode is required, not cosmetic.
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.86))
     if (!blob) throw new Error('invalid_photo')
     return blob
   } finally {
-    URL.revokeObjectURL(objectURL)
+    decoded.release()
   }
 }
 

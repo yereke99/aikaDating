@@ -56,6 +56,8 @@ export interface TelegramWebApp {
   BackButton?: BackButton
   ready(): void
   expand(): void
+  requestFullscreen?: () => void
+  exitFullscreen?: () => void
   disableVerticalSwipes?: () => void
   setHeaderColor?: (color: string) => void
   setBackgroundColor?: (color: string) => void
@@ -180,12 +182,29 @@ export function initializeTelegram(): TelegramWebApp | undefined {
   }
 
   app.ready()
-  app.expand()
 
-  // Deliberately no requestFullscreen(): in fullscreen Telegram draws its close/collapse/menu
-  // controls over the webview, which is what buried the app header. Expanded mode keeps the
-  // native controls in their own bar above the content.
+  // Entry points differ: the menu button and t.me deep links can hand the app a collapsed
+  // viewport, and a single expand() at boot is sometimes dropped while the webview is still
+  // settling. Expansion is therefore re-asserted on every viewport signal the client sends.
+  // `isExpanded` guards the call, so this cannot loop and cannot fight a deliberate collapse.
+  const ensureExpanded = () => {
+    if (app.isExpanded === false) call(() => app.expand())
+  }
+  call(() => app.expand())
+  app.onEvent('viewportChanged', ensureExpanded)
+  app.onEvent('activated', ensureExpanded)
+
   call(() => app.disableVerticalSwipes?.())
+
+  // Fullscreen is what makes the app own the whole screen instead of sitting below Telegram's
+  // header bar. It is safe to request now: the header overlap it used to cause came from the
+  // inset maths (max() instead of safe + content), which styles.css now sums correctly, so the
+  // app header clears the floating native controls. Clients that cannot do it — Telegram
+  // Desktop, anything below Bot API 8.0 — report fullscreenFailed and simply stay expanded.
+  if (app.requestFullscreen && app.isVersionAtLeast?.('8.0')) {
+    call(() => app.requestFullscreen?.())
+  }
+  app.onEvent('fullscreenFailed', ensureExpanded)
 
   const paintNativeChrome = () => {
     call(() => app.setHeaderColor?.('bg_color'))
