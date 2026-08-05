@@ -1,6 +1,17 @@
 export type Language = 'ru' | 'kk' | 'en'
 export type Gender = 'male' | 'female' | 'other'
 
+/** One image of a gallery. `thumb_url` is the small variant list cards should load. */
+export interface Photo {
+  id: string
+  url: string
+  thumb_url?: string
+  sort_order?: number
+  is_primary?: boolean
+  width?: number
+  height?: number
+}
+
 export interface Me {
   id: string
   telegram_user_id: number
@@ -21,6 +32,8 @@ export interface Me {
   is_admin: boolean
   location_available: boolean
   location_updated_at?: string
+  photos?: Photo[]
+  max_photos?: number
 }
 
 export interface ProfileInput {
@@ -44,12 +57,38 @@ export interface PublicProfile {
   purpose?: string
   bio?: string
   distance_km?: number
+  photos?: Photo[]
+  /** Deadlines of the viewer's own timers towards this profile, in server time. */
+  like_next_allowed_at?: string
+  message_next_allowed_at?: string
 }
 
 export interface NearbyPage {
   users: PublicProfile[]
   page: number
   has_more: boolean
+  server_time?: string
+}
+
+export interface Gallery {
+  photos: Photo[]
+  max_photos: number
+  me?: Me
+}
+
+export interface CooldownsResponse {
+  server_time: string
+  window_seconds: number
+  cooldowns: Partial<Record<'like' | 'message', { next_allowed_at: string; retry_after_seconds: number }>>
+}
+
+export interface ActionResult {
+  success: boolean
+  message: string
+  action: 'like' | 'message'
+  next_allowed_at?: string
+  retry_after_seconds?: number
+  server_time?: string
 }
 
 export interface AdminStats {

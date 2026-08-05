@@ -1,8 +1,8 @@
 # AikaBot
 
-AikaBot is a small Telegram bot and Telegram Mini App for discovering nearby people, viewing short profiles, and sending a like with an optional short message. It runs as one Go process and stores application data in one SQLite table: `users`.
+AikaBot is a small Telegram bot and Telegram Mini App for discovering nearby people, viewing short profiles, and sending a like or a short personal message. It runs as one Go process and stores application data in three SQLite tables: `users`, `user_photos`, and `user_action_cooldowns`.
 
-Likes and messages are delivered immediately through the Telegram Bot API. They are never written to SQLite.
+Like and message *content* is delivered immediately through the Telegram Bot API and is never written to SQLite. Only the per-target cooldown timestamps are stored.
 
 ## Architecture
 
@@ -11,6 +11,9 @@ Likes and messages are delivered immediately through the Telegram Bot API. They 
 - React + TypeScript + Vite Mini App, served by Go in production
 - Telegram `initData` authentication on every protected API request
 - In-memory, per-sender one-minute like rate limiter
+- Database-authoritative, per-target 30-minute cooldown for likes and for messages, tracked separately
+- Up to three profile photos per user, stored per-owner on disk and mirrored into the profile avatar
+- Two-second nearby refresh with entity-tag revalidation, so an unchanged neighbourhood costs a 304
 
 SQLite `INTEGER` is a signed 64-bit value, so both `telegram_user_id` and `telegram_chat_id` retain Telegram's full numeric IDs. Internal profile IDs are random UUIDv4 strings.
 
@@ -64,7 +67,14 @@ To test inside Telegram, use an HTTPS tunnel or a development HTTPS domain, conf
 
 ## Database and migrations
 
-The application automatically applies [`migrations/000001_create_users.up.sql`](migrations/000001_create_users.up.sql) at startup. The migration creates only the `users` table and its indexes. It does not create a migration-history, likes, messages, sessions, locations, or admin table.
+The application applies every `migrations/*.up.sql` file in filename order at startup:
+
+- [`000001_create_users.up.sql`](migrations/000001_create_users.up.sql) — the `users` table and its indexes.
+- [`000002_photos_and_cooldowns.up.sql`](migrations/000002_photos_and_cooldowns.up.sql) — `user_photos` (gallery, one primary photo per user) and `user_action_cooldowns` (one row per actor/target/action). It also backfills one photo row for every user who already had an avatar, without moving or rewriting any file.
+
+Each file is written to be safe to re-run — `IF NOT EXISTS` for schema, `NOT EXISTS` guards for data — so no migration-history table is needed. `000002_photos_and_cooldowns.down.sql` drops only the two new tables; `users.custom_photo_url` is left intact by the up migration, so a rollback restores the original single-avatar behaviour and loses no image.
+
+There is still no likes, messages, sessions, or admin table.
 
 The default local file is `./data/aikabot.db`. SQLite WAL sidecar files can exist while the process is running; they are part of SQLite's storage mechanism, not additional application databases.
 
@@ -88,7 +98,9 @@ Run only one AikaBot process against a SQLite file. Do not place the database on
 | `PROFILE_PHOTO_DIR` | no | Profile image directory, default `/profile_photo`; created automatically with mode `0755` |
 | `ADMIN_TELEGRAM_IDS` | no | Comma-separated verified Telegram user IDs |
 | `AUTH_MAX_AGE` | no | Maximum `initData` age, default `24h` |
-| `LIKE_RATE_PER_MINUTE` | no | Per-sender rate, default `5` |
+| `LIKE_RATE_PER_MINUTE` | no | Per-sender burst rate, default `5` |
+| `ACTION_COOLDOWN` | no | Per-target window for a like and, separately, for a message; default `30m` |
+| `MAX_PROFILE_PHOTOS` | no | Photos per user, default `3` |
 | `WEB_DIR` | no | Built frontend directory, default `./web/dist` |
 | `APP_ENV` | no | Use `production` to require HTTPS |
 | `LOCAL_DEV` and `DEV_TELEGRAM_*` | local only | Isolated browser-development identity |
@@ -101,11 +113,16 @@ The onboarding form offers two native mobile actions: **choose from gallery** an
 
 Before upload, the Mini App scales the image to at most 1600 pixels on its longest side and converts it to JPEG. The authenticated server endpoint accepts one multipart `photo`, limits the request to 8 MB, allows only decodable JPEG/PNG images, and rejects excessive dimensions. It then decodes and re-encodes the image as JPEG, removing EXIF metadata such as embedded GPS coordinates.
 
-Photos are atomically stored as:
+Each user may keep up to `MAX_PROFILE_PHOTOS` photos (default 3). The first photo in the gallery is the primary one: promoting or reordering photos rewrites `users.custom_photo_url` in the same transaction, so the avatar shown in lists, public profiles and Telegram notifications always matches `photos[0]`.
+
+Photos are atomically stored under the authenticated owner's directory, with a generated name and a small variant for list cards:
 
 ```text
-/profile_photo/{internal-user-uuid}.jpg
+/profile_photo/users/{internal-user-uuid}/photos/{generated-uuid}.jpg
+/profile_photo/users/{internal-user-uuid}/photos/{generated-uuid}_t.jpg
 ```
+
+The user ID always comes from the authenticated request context; no part of a stored path is ever taken from the request body. Reads accept only the two layouts above, verified by pattern and then re-checked against the photo root, so a traversal attempt is refused before any filesystem call. The historical flat layout `/profile_photo/{internal-user-uuid}.jpg` is still served for photos uploaded before the gallery existed.
 
 The directory is created at application startup with `os.MkdirAll(..., 0755)`. Local development uses `PROFILE_PHOTO_DIR=./profile_photo` from `.env.example`; Docker uses a persistent volume mounted at `/profile_photo`. Public photo URLs contain only an opaque UUID filename and expose no filesystem traversal or Telegram ID.
 
@@ -163,10 +180,18 @@ All `/api` routes except `POST /api/auth/telegram` require a valid authorization
 | `GET` | `/api/me` | Current user's safe profile and server-derived `is_admin` |
 | `PATCH` | `/api/me` | Update onboarding/profile fields and active state |
 | `POST` | `/api/me/location` | Store the current user's latitude/longitude |
-| `POST` | `/api/me/photo` | Authenticated JPEG/PNG multipart upload from gallery or selfie camera |
+| `POST` | `/api/me/photo` | Legacy single-avatar upload; now replaces the primary gallery photo |
+| `GET` | `/api/me/photos` | Current user's gallery and the configured maximum |
+| `POST` | `/api/me/photos` | Add one JPEG/PNG multipart photo; 409 `photo_limit_reached` at the maximum |
+| `PATCH` | `/api/me/photos/order` | Reorder; the body must list exactly the caller's photo IDs |
+| `PATCH` | `/api/me/photos/{uuid}/primary` | Promote one photo to the front of the gallery |
+| `DELETE` | `/api/me/photos/{uuid}` | Delete one photo; refuses the last one when no Telegram avatar exists |
 | `GET` | `/api/users/nearby?radius_km=20&page=1&limit=20&gender=female` | Paginated nearby profiles; radius must be 5, 10, 20, or 500 |
-| `GET` | `/api/users/{uuid}` | Safe public profile used by Mini App deep links |
-| `POST` | `/api/users/{uuid}/like` | Send a like; `{}` means no message, `{"message":"..."}` attaches up to 300 characters |
+| `GET` | `/api/users/{uuid}` | Safe public profile with its gallery, used by Mini App deep links |
+| `GET` | `/api/users/{uuid}/photos` | Another user's gallery, subject to the same visibility rules |
+| `GET` | `/api/users/{uuid}/cooldowns` | The caller's own like/message deadlines towards that user, plus server time |
+| `POST` | `/api/users/{uuid}/like` | Send a like; `{}` is the like action, `{"message":"..."}` performs the message action instead |
+| `POST` | `/api/users/{uuid}/message` | Send a personal message of up to 300 characters |
 | `GET` | `/api/admin/stats` | Admin-only aggregate statistics |
 | `GET` | `/api/admin/users?search=...` | Admin-only searchable user list without exact coordinates |
 | `GET` | `/health` | SQLite connectivity health check |
@@ -182,7 +207,33 @@ Errors have a stable shape:
 }
 ```
 
+A refused action additionally reports its deadline, both inside the envelope and at the top level, so a client can start a countdown from one response:
+
+```json
+{
+  "error": { "code": "like_cooldown_active", "message": "...", "next_allowed_at": "2026-08-05T16:30:00Z", "retry_after_seconds": 1437 },
+  "success": false,
+  "code": "like_cooldown_active",
+  "action": "like",
+  "next_allowed_at": "2026-08-05T16:30:00Z",
+  "retry_after_seconds": 1437,
+  "server_time": "2026-08-05T16:06:03Z"
+}
+```
+
+`GET /api/users/nearby` sends an `ETag` and honours `If-None-Match`, answering an unchanged neighbourhood with `304 Not Modified` and no body. The tag covers the profiles, their photos and the caller's cooldown deadlines — everything except the clock — so the two-second refresh does not re-download unchanged data or re-request images.
+
 Admin authorization is determined only from the verified Telegram ID and `ADMIN_TELEGRAM_IDS`. Ordinary users receive HTTP 403 and never receive admin data or an admin navigation entry.
+
+## Action cooldowns
+
+A like and a message each have their own timer per (sender, recipient) pair, so one never blocks the other. Enforcement is entirely server-side.
+
+Each attempt claims its timer with a single `INSERT ... ON CONFLICT DO UPDATE ... WHERE next_allowed_at <= now RETURNING ...` inside a transaction. Two concurrent requests therefore cannot both observe an expired row and both write a fresh one: the second one's `WHERE` is evaluated against the first one's committed value, and it is refused with the active deadline. Double taps, retries, a second device and direct API calls all funnel through the same statement.
+
+The claim is taken *before* the Telegram notification is sent, so a duplicate that arrives while the first is still in flight is refused rather than delivered twice. If delivery then fails, the claim is released — matching the deadline it wrote, so a newer claim is never discarded — because an action that was never delivered should not cost the sender a full window.
+
+Deadlines are stored as Unix milliseconds and reported as RFC3339 server time. The Mini App measures its offset from the server clock and renders every countdown against that, so a wrong device clock cannot show a timer that disagrees with what the server will allow.
 
 ## Production deployment
 
@@ -224,11 +275,15 @@ The unit assumes nvm is installed at `/root/.nvm` and the repository is located 
 ## Tests and builds
 
 ```bash
-go test ./...
+make test          # go test ./... , tsc --noEmit , node --test
 go vet ./...
 cd web && npm ci && npm run build
 docker compose config
 ```
 
-Focused Go tests cover Telegram HMAC validation and expiration, SQLite upsert uniqueness, admin allowlisting, Haversine distance, radius/current-user/blocked-user filtering, self-like rejection, short-message validation, normalized profile photo storage/upload/delivery, and escaped localized Telegram notification formatting.
+Frontend tests run on Node's own test runner and type stripping (`node --test 'src/**/*.test.ts'`), so they add no dependency to the project.
+
+Go tests cover Telegram HMAC validation and expiration, SQLite upsert uniqueness, migration idempotency and rollback, admin allowlisting, Haversine distance, radius/current-user/blocked-user filtering, self-like rejection, short-message validation, profile photo storage/upload/delivery, gallery ordering, primary-photo promotion, cross-account photo rejection, path-traversal rejection, cooldown windows and their independence, concurrent claims collapsing to one action, entity-tag revalidation, and escaped localized Telegram notification formatting.
+
+TypeScript tests cover calendar-date parsing and formatting across timezones, leap years, age boundaries, countdown maths and formatting, cooldown merging, the polling loop's non-overlap, abort-on-stop, backoff and recovery, and list merging that neither duplicates nor reorders cards.
 # aikaDating

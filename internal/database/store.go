@@ -44,9 +44,16 @@ func Open(ctx context.Context, databasePath string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("connect to SQLite: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, migrations.UsersUp); err != nil {
+	statements, err := migrations.Statements()
+	if err != nil {
 		db.Close()
-		return nil, fmt.Errorf("apply SQLite migration: %w", err)
+		return nil, err
+	}
+	for _, statement := range statements {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("apply SQLite migration: %w", err)
+		}
 	}
 	return &Store{db: db}, nil
 }

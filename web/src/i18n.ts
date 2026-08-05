@@ -1,8 +1,13 @@
 import type { Language } from './types'
 
+/**
+ * `nearby`/`profile` name a screen; `navNearby`/`navProfile` are the short forms the tab bar uses,
+ * so a long Kazakh screen title does not have to be ellipsised into a 75px tab.
+ */
 const messages = {
   ru: {
     nearby: 'Люди рядом', profile: 'Моя анкета', settings: 'Настройки', admin: 'Админ',
+    navNearby: 'Рядом', navProfile: 'Анкета', navSettings: 'Настройки', navAdmin: 'Админ',
     locationTitle: 'Покажем людей поблизости', locationBody: 'Геолокация нужна только для расчёта примерного расстояния. Точные координаты другим пользователям не показываются.',
     allowLocation: 'Разрешить геолокацию', retry: 'Повторить', openSettings: 'Открыть настройки',
     noPeople: 'Пока никого рядом', noPeopleBody: 'Попробуйте увеличить радиус или вернуться позже.',
@@ -27,9 +32,22 @@ const messages = {
     networkError: 'Нет связи с сервером. Проверьте интернет.', serverError: 'Что-то пошло не так. Попробуйте ещё раз.',
     location_denied: 'Доступ к геолокации запрещён.', location_unsupported: 'Геолокация не поддерживается на этом устройстве.', location_timeout: 'Геолокация не ответила вовремя.', location_unavailable: 'Не удалось определить геолокацию.',
     publicProfile: 'Анкета', close: 'Закрыть', profileHidden: 'Анкета недоступна.', distance: 'примерно',
+    addPhoto: 'Добавить фото', deletePhoto: 'Удалить фото', makePrimary: 'Сделать главной', primaryPhoto: 'Главная',
+    photoDeleted: 'Фото удалено', primaryChanged: 'Главная фотография изменена', uploadFailed: 'Не удалось загрузить фото.',
+    maxPhotosReached: 'Больше фотографий добавить нельзя.', unsupportedImage: 'Неподдерживаемый формат изображения.',
+    photoTooLarge: 'Фото слишком большое.', photoRequiredLast: 'Нужна хотя бы одна фотография.',
+    photosHint: 'Первая фотография — главная. Перетаскивать не нужно: используйте стрелки.',
+    movePhotoLeft: 'Переместить левее', movePhotoRight: 'Переместить правее', photoCount: 'фото',
+    sending: 'Отправляем…', messageSent: 'Сообщение отправлено', likeCooldown: 'Вы уже лайкнули этого пользователя.',
+    messageCooldown: 'Вы уже написали этому пользователю.', tryAgainIn: 'Повторить можно через',
+    networkUnavailable: 'Нет связи', reconnecting: 'Переподключение…', updating: 'Обновляем…',
+    invalidBirthDate2: 'Некорректная дата рождения.', selectDate: 'Выберите дату', day: 'День', month: 'Месяц', year: 'Год',
+    done: 'Готово', notSelected: 'Не выбрано', photo: 'Фотография', previousPhoto: 'Предыдущее фото', nextPhoto: 'Следующее фото',
+    openPhotos: 'Открыть фотографии',
   },
   kk: {
     nearby: 'Жақын жердегі адамдар', profile: 'Менің профилім', settings: 'Баптаулар', admin: 'Әкімші',
+    navNearby: 'Жақында', navProfile: 'Профилім', navSettings: 'Баптаулар', navAdmin: 'Әкімші',
     locationTitle: 'Жақындағы адамдарды көрсетеміз', locationBody: 'Геолокация тек шамамен қашықтықты есептеу үшін қажет. Нақты координаттар басқа қолданушыларға көрсетілмейді.',
     allowLocation: 'Геолокацияға рұқсат беру', retry: 'Қайталау', openSettings: 'Баптауларды ашу',
     noPeople: 'Әзірге жақын жерде ешкім жоқ', noPeopleBody: 'Радиусты үлкейтіп көріңіз немесе кейінірек кіріңіз.',
@@ -54,9 +72,22 @@ const messages = {
     networkError: 'Сервермен байланыс жоқ. Интернетті тексеріңіз.', serverError: 'Қате орын алды. Қайталап көріңіз.',
     location_denied: 'Геолокацияға рұқсат берілмеді.', location_unsupported: 'Бұл құрылғы геолокацияны қолдамайды.', location_timeout: 'Геолокация уақытында жауап бермеді.', location_unavailable: 'Геолокация анықталмады.',
     publicProfile: 'Профиль', close: 'Жабу', profileHidden: 'Профиль қолжетімсіз.', distance: 'шамамен',
+    addPhoto: 'Фото қосу', deletePhoto: 'Фотоны жою', makePrimary: 'Негізгі ету', primaryPhoto: 'Негізгі',
+    photoDeleted: 'Фото жойылды', primaryChanged: 'Негізгі фото өзгертілді', uploadFailed: 'Фотоны жүктеу мүмкін болмады.',
+    maxPhotosReached: 'Бұдан көп фото қосу мүмкін емес.', unsupportedImage: 'Сурет форматы қолдау таппайды.',
+    photoTooLarge: 'Фото тым үлкен.', photoRequiredLast: 'Кемінде бір фото қажет.',
+    photosHint: 'Бірінші фото — негізгі. Ретін көрсеткілермен өзгертіңіз.',
+    movePhotoLeft: 'Солға жылжыту', movePhotoRight: 'Оңға жылжыту', photoCount: 'фото',
+    sending: 'Жіберілуде…', messageSent: 'Хабарлама жіберілді', likeCooldown: 'Сіз бұл қолданушыға лайк қойғансыз.',
+    messageCooldown: 'Сіз бұл қолданушыға хабарлама жаздыңыз.', tryAgainIn: 'Қайталауға болады',
+    networkUnavailable: 'Байланыс жоқ', reconnecting: 'Қайта қосылуда…', updating: 'Жаңартылуда…',
+    invalidBirthDate2: 'Туған күні дұрыс емес.', selectDate: 'Күнді таңдаңыз', day: 'Күн', month: 'Ай', year: 'Жыл',
+    done: 'Дайын', notSelected: 'Таңдалмаған', photo: 'Фото', previousPhoto: 'Алдыңғы фото', nextPhoto: 'Келесі фото',
+    openPhotos: 'Фотоларды ашу',
   },
   en: {
     nearby: 'People nearby', profile: 'My profile', settings: 'Settings', admin: 'Admin',
+    navNearby: 'Nearby', navProfile: 'Profile', navSettings: 'Settings', navAdmin: 'Admin',
     locationTitle: 'Discover people nearby', locationBody: 'Location is used only to calculate approximate distance. Your exact coordinates are never shown to other users.',
     allowLocation: 'Allow location', retry: 'Try again', openSettings: 'Open settings',
     noPeople: 'No one nearby yet', noPeopleBody: 'Try a wider radius or come back later.',
@@ -81,6 +112,18 @@ const messages = {
     networkError: 'Cannot reach the server. Check your connection.', serverError: 'Something went wrong. Please try again.',
     location_denied: 'Location permission was denied.', location_unsupported: 'Location is not supported on this device.', location_timeout: 'Location timed out.', location_unavailable: 'Your location could not be determined.',
     publicProfile: 'Profile', close: 'Close', profileHidden: 'This profile is unavailable.', distance: 'about',
+    addPhoto: 'Add photo', deletePhoto: 'Delete photo', makePrimary: 'Make main', primaryPhoto: 'Main',
+    photoDeleted: 'Photo deleted', primaryChanged: 'Main photo changed', uploadFailed: 'The photo could not be uploaded.',
+    maxPhotosReached: 'You cannot add more photos.', unsupportedImage: 'Unsupported image format.',
+    photoTooLarge: 'The photo is too large.', photoRequiredLast: 'At least one photo is required.',
+    photosHint: 'The first photo is the main one. Use the arrows to change the order.',
+    movePhotoLeft: 'Move left', movePhotoRight: 'Move right', photoCount: 'photos',
+    sending: 'Sending…', messageSent: 'Message sent', likeCooldown: 'You already liked this user.',
+    messageCooldown: 'You already messaged this user.', tryAgainIn: 'You can try again in',
+    networkUnavailable: 'No connection', reconnecting: 'Reconnecting…', updating: 'Updating…',
+    invalidBirthDate2: 'Invalid birth date.', selectDate: 'Select a date', day: 'Day', month: 'Month', year: 'Year',
+    done: 'Done', notSelected: 'Not selected', photo: 'Photo', previousPhoto: 'Previous photo', nextPhoto: 'Next photo',
+    openPhotos: 'Open photos',
   },
 } as const
 

@@ -27,7 +27,15 @@ type fakeTelegram struct{}
 
 func (fakeTelegram) SendLike(context.Context, domain.User, domain.User, string) error { return nil }
 
-func testServer(t *testing.T, devUserID, adminID int64) http.Handler {
+// environment is one wired-up server plus the pieces a test needs to arrange state directly.
+type environment struct {
+	router http.Handler
+	store  *database.Store
+	photos *profilephoto.Store
+	cfg    config.Config
+}
+
+func testEnvironment(t *testing.T, devUserID, adminID int64, adjust ...func(*config.Config)) environment {
 	t.Helper()
 	store, err := database.Open(context.Background(), ":memory:")
 	if err != nil {
@@ -37,13 +45,23 @@ func testServer(t *testing.T, devUserID, adminID int64) http.Handler {
 	cfg := config.Config{
 		BotToken: "test", AuthMaxAge: time.Hour, LocalDev: true, DevUserID: devUserID,
 		DevFirstName: "Test", DevLanguageCode: "en", MiniAppOrigin: "http://localhost:5173",
-		AdminTelegramIDs: map[int64]struct{}{adminID: {}}, LikeRatePerMinute: 5,
+		AdminTelegramIDs: map[int64]struct{}{adminID: {}}, LikeRatePerMinute: 60,
+		ActionCooldown: 30 * time.Minute, MaxProfilePhotos: 3,
+	}
+	for _, apply := range adjust {
+		apply(&cfg)
 	}
 	photos, err := profilephoto.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewServer(cfg, store, users.NewService(store), auth.NewValidator(cfg), fakeTelegram{}, photos, zap.NewNop()).Router()
+	router := NewServer(cfg, store, users.NewService(store), auth.NewValidator(cfg), fakeTelegram{}, photos, zap.NewNop()).Router()
+	return environment{router: router, store: store, photos: photos, cfg: cfg}
+}
+
+func testServer(t *testing.T, devUserID, adminID int64) http.Handler {
+	t.Helper()
+	return testEnvironment(t, devUserID, adminID).router
 }
 
 func authenticateDevUser(t *testing.T, router http.Handler) {
@@ -125,5 +143,79 @@ func TestProfilePhotoUploadAndPublicDelivery(t *testing.T) {
 	router.ServeHTTP(photoResponse, photoRequest)
 	if photoResponse.Code != http.StatusOK || photoResponse.Header().Get("Content-Type") != "image/jpeg" {
 		t.Fatalf("photo response status = %d, content type = %q", photoResponse.Code, photoResponse.Header().Get("Content-Type"))
+	}
+}
+
+func TestNearbyRespectsRadiusAndRevalidatesWithAnEntityTag(t *testing.T) {
+	environment := testEnvironment(t, 123, 999)
+	authenticateDevUser(t, environment.router)
+	ctx := context.Background()
+
+	viewer, err := environment.store.GetUserByTelegramID(ctx, 123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeProfile(t, environment.store, viewer)
+	if err := environment.store.UpdateLocation(ctx, viewer.ID, 43.238949, 76.889709); err != nil {
+		t.Fatal(err)
+	}
+	// One neighbour a few kilometres away and one in another city.
+	for index, coordinates := range [][2]float64{{43.24, 76.89}, {51.1694, 71.4491}} {
+		neighbour, err := environment.store.UpsertTelegramUser(ctx, strangerProfile(int64(500+index)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		completeProfile(t, environment.store, neighbour)
+		if err := environment.store.UpdateLocation(ctx, neighbour.ID, coordinates[0], coordinates[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	near := authorized(t, environment.router, http.MethodGet, "/api/users/nearby?radius_km=5&page=1&limit=20", "")
+	if near.Code != http.StatusOK {
+		t.Fatalf("nearby status = %d, body = %s", near.Code, near.Body.String())
+	}
+	var page users.NearbyPage
+	if err := json.NewDecoder(near.Body).Decode(&page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Users) != 1 {
+		t.Fatalf("users within 5 km = %d, want 1", len(page.Users))
+	}
+	if page.ServerTime == "" {
+		t.Fatal("nearby response carries no server time for countdown synchronisation")
+	}
+
+	wide := authorized(t, environment.router, http.MethodGet, "/api/users/nearby?radius_km=500&page=1&limit=20", "")
+	var widePage users.NearbyPage
+	if err := json.NewDecoder(wide.Body).Decode(&widePage); err != nil {
+		t.Fatal(err)
+	}
+	if len(widePage.Users) != 1 {
+		t.Fatalf("users within 500 km = %d, want 1 (the other city is farther)", len(widePage.Users))
+	}
+
+	tag := near.Header().Get("ETag")
+	if tag == "" {
+		t.Fatal("nearby response has no ETag")
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/users/nearby?radius_km=5&page=1&limit=20", nil)
+	request.Header.Set("Authorization", "dev")
+	request.Header.Set("If-None-Match", tag)
+	revalidated := httptest.NewRecorder()
+	environment.router.ServeHTTP(revalidated, request)
+	if revalidated.Code != http.StatusNotModified {
+		t.Fatalf("revalidation status = %d, want 304", revalidated.Code)
+	}
+	if revalidated.Body.Len() != 0 {
+		t.Fatalf("304 response carried a body of %d bytes", revalidated.Body.Len())
+	}
+}
+
+func TestNearbyRejectsAnUnsupportedRadius(t *testing.T) {
+	router := testServer(t, 123, 999)
+	authenticateDevUser(t, router)
+	if response := authorized(t, router, http.MethodGet, "/api/users/nearby?radius_km=7", ""); response.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported radius status = %d, want 400", response.Code)
 	}
 }

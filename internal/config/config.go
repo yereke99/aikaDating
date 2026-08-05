@@ -23,12 +23,17 @@ type Config struct {
 	AdminTelegramIDs  map[int64]struct{}
 	AuthMaxAge        time.Duration
 	LikeRatePerMinute int
-	LocalDev          bool
-	DevUserID         int64
-	DevFirstName      string
-	DevLastName       string
-	DevUsername       string
-	DevLanguageCode   string
+	// ActionCooldown is the single window every per-target action timer uses: after a like or a
+	// message to one user, the same action towards that user is refused until it elapses.
+	ActionCooldown time.Duration
+	// MaxProfilePhotos caps a user's gallery.
+	MaxProfilePhotos int
+	LocalDev         bool
+	DevUserID        int64
+	DevFirstName     string
+	DevLastName      string
+	DevUsername      string
+	DevLanguageCode  string
 }
 
 func Load() (Config, error) {
@@ -44,6 +49,8 @@ func Load() (Config, error) {
 		ProfilePhotoDir:   env("PROFILE_PHOTO_DIR", "/profile_photo"),
 		AuthMaxAge:        durationEnv("AUTH_MAX_AGE", 24*time.Hour),
 		LikeRatePerMinute: intEnv("LIKE_RATE_PER_MINUTE", 5),
+		ActionCooldown:    durationEnv("ACTION_COOLDOWN", 30*time.Minute),
+		MaxProfilePhotos:  intEnv("MAX_PROFILE_PHOTOS", 3),
 		LocalDev:          boolEnv("LOCAL_DEV", false),
 		DevUserID:         int64Env("DEV_TELEGRAM_USER_ID", 0),
 		DevFirstName:      env("DEV_TELEGRAM_FIRST_NAME", "Local"),
@@ -94,6 +101,12 @@ func Load() (Config, error) {
 	}
 	if cfg.LikeRatePerMinute < 1 || cfg.LikeRatePerMinute > 60 {
 		return Config{}, errors.New("LIKE_RATE_PER_MINUTE must be between 1 and 60")
+	}
+	if cfg.ActionCooldown <= 0 || cfg.ActionCooldown > 24*time.Hour {
+		return Config{}, errors.New("ACTION_COOLDOWN must be between 1s and 24h")
+	}
+	if cfg.MaxProfilePhotos < 1 || cfg.MaxProfilePhotos > 12 {
+		return Config{}, errors.New("MAX_PROFILE_PHOTOS must be between 1 and 12")
 	}
 	return cfg, nil
 }

@@ -18,6 +18,7 @@ build: check-node $(WEB_STAMP)
 test:
 	go test ./...
 	npm --prefix web run lint
+	npm --prefix web run test
 
 tools: $(AIR)
 

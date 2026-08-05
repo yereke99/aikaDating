@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,7 +21,6 @@ import (
 	"aika/internal/database"
 	"aika/internal/domain"
 	"aika/internal/profilephoto"
-	"aika/internal/telegram"
 	"aika/internal/users"
 
 	"github.com/go-chi/chi/v5"
@@ -52,7 +53,7 @@ func (s *Server) Router() http.Handler {
 	router := chi.NewRouter()
 	router.Use(s.recoverer, s.requestLogger, s.securityHeaders, s.httpsOnly, s.cors)
 	router.Get("/health", s.health)
-	router.Get("/profile_photo/{filename}", s.serveProfilePhoto)
+	router.Get("/profile_photo/*", s.serveProfilePhoto)
 	router.Route("/api", func(api chi.Router) {
 		api.Post("/auth/telegram", s.telegramAuth)
 		api.Group(func(protected chi.Router) {
@@ -61,9 +62,17 @@ func (s *Server) Router() http.Handler {
 			protected.Patch("/me", s.patchMe)
 			protected.Post("/me/location", s.updateLocation)
 			protected.Post("/me/photo", s.uploadProfilePhoto)
+			protected.Get("/me/photos", s.listMyPhotos)
+			protected.Post("/me/photos", s.addPhoto)
+			protected.Patch("/me/photos/order", s.reorderPhotos)
+			protected.Patch("/me/photos/{photoID}/primary", s.setPrimaryPhoto)
+			protected.Delete("/me/photos/{photoID}", s.deletePhoto)
 			protected.Get("/users/nearby", s.nearbyUsers)
 			protected.Get("/users/{id}", s.publicProfile)
+			protected.Get("/users/{id}/photos", s.userPhotos)
+			protected.Get("/users/{id}/cooldowns", s.userCooldowns)
 			protected.Post("/users/{id}/like", s.likeUser)
+			protected.Post("/users/{id}/message", s.messageUser)
 			protected.Route("/admin", func(admin chi.Router) {
 				admin.Use(s.requireAdmin)
 				admin.Get("/stats", s.adminStats)
@@ -73,77 +82,6 @@ func (s *Server) Router() http.Handler {
 	})
 	router.NotFound(s.serveFrontend)
 	return router
-}
-
-func (s *Server) uploadProfilePhoto(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, profilephoto.MaxUploadBytes+(1<<20))
-	reader, err := r.MultipartReader()
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_photo", localized(currentUser(r).AppLanguage, "invalid_photo"))
-		return
-	}
-	var uploaded []byte
-	for {
-		part, err := reader.NextPart()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_photo", localized(currentUser(r).AppLanguage, "invalid_photo"))
-			return
-		}
-		if part.FormName() != "photo" || uploaded != nil {
-			part.Close()
-			writeError(w, http.StatusBadRequest, "invalid_photo", localized(currentUser(r).AppLanguage, "invalid_photo"))
-			return
-		}
-		uploaded, err = io.ReadAll(io.LimitReader(part, profilephoto.MaxUploadBytes+1))
-		part.Close()
-		if err != nil {
-			s.internalError(w, r, err)
-			return
-		}
-	}
-	if len(uploaded) == 0 {
-		writeError(w, http.StatusBadRequest, "invalid_photo", localized(currentUser(r).AppLanguage, "invalid_photo"))
-		return
-	}
-	if len(uploaded) > profilephoto.MaxUploadBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "photo_too_large", localized(currentUser(r).AppLanguage, "photo_too_large"))
-		return
-	}
-	user := currentUser(r)
-	photoURL, err := s.photos.Save(user.ID, uploaded)
-	if errors.Is(err, profilephoto.ErrInvalidImage) {
-		writeError(w, http.StatusUnprocessableEntity, "invalid_photo", localized(user.AppLanguage, "invalid_photo"))
-		return
-	}
-	if err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	updated, err := s.store.UpdateProfilePhoto(r.Context(), user.ID, photoURL)
-	if err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.meDTO(updated))
-}
-
-func (s *Server) serveProfilePhoto(w http.ResponseWriter, r *http.Request) {
-	path, valid := s.photos.FilePath(chi.URLParam(r, "filename"))
-	if !valid {
-		http.NotFound(w, r)
-		return
-	}
-	if _, err := os.Stat(path); err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "image/jpeg")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Content-Disposition", "inline")
-	http.ServeFile(w, r, path)
 }
 
 type userContextKey struct{}
@@ -197,11 +135,11 @@ func (s *Server) telegramAuth(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.meDTO(user))
+	writeJSON(w, http.StatusOK, s.meWithPhotos(r, user))
 }
 
 func (s *Server) getMe(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.meDTO(currentUser(r)))
+	writeJSON(w, http.StatusOK, s.meWithPhotos(r, currentUser(r)))
 }
 
 type meResponse struct {
@@ -224,6 +162,18 @@ type meResponse struct {
 	IsAdmin            bool    `json:"is_admin"`
 	LocationAvailable  bool    `json:"location_available"`
 	LocationUpdatedAt  *string `json:"location_updated_at,omitempty"`
+	// Gallery. photo_url stays the single avatar every older client reads, so both work together.
+	Photos    []photoResponse `json:"photos"`
+	MaxPhotos int             `json:"max_photos"`
+}
+
+// meWithPhotos is the profile response used by every endpoint that returns the current user, so a
+// client always receives the gallery alongside the profile it just read or changed.
+func (s *Server) meWithPhotos(r *http.Request, user domain.User) meResponse {
+	response := s.meDTO(user)
+	response.Photos = photoDTOs(s.photosOf(r.Context(), user.ID))
+	response.MaxPhotos = s.cfg.MaxProfilePhotos
+	return response
 }
 
 func (s *Server) meDTO(user domain.User) meResponse {
@@ -277,7 +227,7 @@ func (s *Server) patchMe(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.meDTO(updated))
+	writeJSON(w, http.StatusOK, s.meWithPhotos(r, updated))
 }
 
 type locationRequest struct {
@@ -330,7 +280,39 @@ func (s *Server) nearbyUsers(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
+	// The list is polled every couple of seconds. Its entity tag covers the profiles, their photos
+	// and the caller's cooldown deadlines — everything except the server clock — so an unchanged
+	// neighbourhood answers with an empty 304 instead of the full payload and its image URLs.
+	tag, err := entityTag(result.Users, result.Page, result.HasMore)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	w.Header().Set("ETag", tag)
+	w.Header().Set("Cache-Control", "private, no-cache")
+	if matchesEntityTag(r.Header.Get("If-None-Match"), tag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func entityTag(values ...any) (string, error) {
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return `"` + hex.EncodeToString(digest[:16]) + `"`, nil
+}
+
+func matchesEntityTag(header, tag string) bool {
+	for _, candidate := range strings.Split(header, ",") {
+		if strings.TrimSpace(candidate) == tag {
+			return true
+		}
+	}
+	return false
 }
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -355,64 +337,12 @@ func (s *Server) publicProfile(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, users.ToPublicProfile(user, time.Now()))
-}
-
-type likeRequest struct {
-	Message *string `json:"message"`
-}
-
-func (s *Server) likeUser(w http.ResponseWriter, r *http.Request) {
-	id, valid := pathID(r)
-	if !valid {
-		writeError(w, http.StatusBadRequest, "invalid_user_id", localized(currentUser(r).AppLanguage, "invalid_request"))
-		return
-	}
-	var request likeRequest
-	if err := decodeJSON(w, r, &request, 2<<10); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", localized(currentUser(r).AppLanguage, "invalid_request"))
-		return
-	}
-	sender := currentUser(r)
-	message, err := users.ValidateLike(sender.ID, id, request.Message)
-	if errors.Is(err, users.ErrSelfLike) {
-		writeError(w, http.StatusConflict, "self_like", localized(sender.AppLanguage, "self_like"))
-		return
-	}
-	if errors.Is(err, users.ErrMessageRequired) {
-		writeError(w, http.StatusUnprocessableEntity, "message_required", localized(sender.AppLanguage, "message_required"))
-		return
-	}
-	if errors.Is(err, users.ErrMessageTooLong) {
-		writeError(w, http.StatusUnprocessableEntity, "message_too_long", localized(sender.AppLanguage, "message_too_long"))
-		return
-	}
-	if !sender.IsActive || !sender.IsProfileCompleted {
-		writeError(w, http.StatusConflict, "profile_required", localized(sender.AppLanguage, "profile_required"))
-		return
-	}
-	if !s.limiter.Allow(sender.ID) {
-		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", localized(sender.AppLanguage, "rate_limit_exceeded"))
-		return
-	}
-	recipient, err := s.store.GetUserByID(r.Context(), id)
-	if errors.Is(err, database.ErrNotFound) || (err == nil && (recipient.IsBlocked || !recipient.IsActive || !recipient.IsProfileCompleted)) {
-		writeError(w, http.StatusNotFound, "recipient_unavailable", localized(sender.AppLanguage, "recipient_unavailable"))
-		return
-	}
+	profile, err := s.users.PublicProfileWithPhotos(r.Context(), currentUser(r).ID, user)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
-	if err := s.telegram.SendLike(r.Context(), recipient, sender, message); err != nil {
-		if errors.Is(err, telegram.ErrRecipientUnavailable) {
-			writeError(w, http.StatusConflict, "recipient_unavailable", localized(sender.AppLanguage, "recipient_unavailable"))
-			return
-		}
-		s.internalError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "message": localized(sender.AppLanguage, "like_sent")})
+	writeJSON(w, http.StatusOK, profile)
 }
 
 func (s *Server) adminStats(w http.ResponseWriter, r *http.Request) {
@@ -516,18 +446,20 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, destination any, maxByte
 	return nil
 }
 
+type errorDetail struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	// Present only on a cooldown refusal, where the client needs the deadline to run a countdown.
+	NextAllowedAt     string `json:"next_allowed_at,omitempty"`
+	RetryAfterSeconds int64  `json:"retry_after_seconds,omitempty"`
+}
+
 type errorEnvelope struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
+	Error errorDetail `json:"error"`
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
-	var response errorEnvelope
-	response.Error.Code = code
-	response.Error.Message = message
-	writeJSON(w, status, response)
+	writeJSON(w, status, errorEnvelope{Error: errorDetail{Code: code, Message: message}})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -596,6 +528,12 @@ func localized(language, code string) string {
 			"bio_too_long": "Описание не должно превышать 500 символов.", "invalid_language": "Выберите доступный язык.",
 			"invalid_photo_url": "Укажите корректную HTTPS-ссылку на фото.", "photo_required": "Добавьте фото профиля.",
 			"invalid_photo": "Выберите корректное фото JPEG или PNG.", "photo_too_large": "Фото не должно превышать 8 МБ.",
+			"like_cooldown_active":    "Вы уже лайкнули этого пользователя. Повторный лайк будет доступен позже.",
+			"message_cooldown_active": "Вы уже отправили сообщение этому пользователю. Следующее можно отправить позже.",
+			"message_sent":            "Сообщение отправлено.",
+			"photo_limit_reached":     "Достигнут максимум фотографий.",
+			"photo_not_found":         "Фото не найдено.",
+			"photo_order_mismatch":    "Список фотографий устарел. Обновите страницу.",
 		},
 		"kk": {
 			"invalid_request": "Енгізілген деректерді тексеріңіз.", "invalid_location": "Геолокация дұрыс емес.",
@@ -610,6 +548,12 @@ func localized(language, code string) string {
 			"bio_too_long": "Сипаттама 500 таңбадан аспауы керек.", "invalid_language": "Қолжетімді тілді таңдаңыз.",
 			"invalid_photo_url": "Фотоға дұрыс HTTPS сілтемесін енгізіңіз.", "photo_required": "Профиль фотосын қосыңыз.",
 			"invalid_photo": "Дұрыс JPEG немесе PNG фотосын таңдаңыз.", "photo_too_large": "Фото 8 МБ-тан аспауы керек.",
+			"like_cooldown_active":    "Сіз бұл қолданушыға лайк қойып қойдыңыз. Келесі лайк кейінірек қолжетімді.",
+			"message_cooldown_active": "Сіз бұл қолданушыға хабарлама жібердіңіз. Келесісін кейінірек жіберуге болады.",
+			"message_sent":            "Хабарлама жіберілді.",
+			"photo_limit_reached":     "Фото саны шегіне жетті.",
+			"photo_not_found":         "Фото табылмады.",
+			"photo_order_mismatch":    "Фото тізімі ескірді. Бетті жаңартыңыз.",
 		},
 		"en": {
 			"invalid_request": "Check the submitted data.", "invalid_location": "Invalid location.",
@@ -624,6 +568,12 @@ func localized(language, code string) string {
 			"bio_too_long": "The bio must not exceed 500 characters.", "invalid_language": "Choose a supported language.",
 			"invalid_photo_url": "Enter a valid HTTPS photo URL.", "photo_required": "Add a profile photo.",
 			"invalid_photo": "Choose a valid JPEG or PNG photo.", "photo_too_large": "The photo must not exceed 8 MB.",
+			"like_cooldown_active":    "You already liked this user. You can like again later.",
+			"message_cooldown_active": "You already messaged this user. You can send another one later.",
+			"message_sent":            "Message sent.",
+			"photo_limit_reached":     "Photo limit reached.",
+			"photo_not_found":         "Photo not found.",
+			"photo_order_mismatch":    "The photo list is out of date. Reload and try again.",
 		},
 	}
 	language = domain.NormalizeLanguage(language)
@@ -702,8 +652,8 @@ func (s *Server) cors(next http.Handler) http.Handler {
 			w.Header().Set("Vary", "Origin")
 		}
 		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-None-Match")
 			w.Header().Set("Access-Control-Max-Age", "600")
 			w.WriteHeader(http.StatusNoContent)
 			return

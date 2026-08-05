@@ -142,9 +142,19 @@ class Viewport {
     write(root, '--app-content', app?.contentSafeAreaInset)
 
     // Stable height ignores the on-screen keyboard, so the shell never jumps while typing.
-    // Live height tracks it, so bottom sheets can lift above the keyboard.
     root.style.setProperty('--app-vh-stable', `${usable(app?.viewportStableHeight, fallback)}px`)
-    root.style.setProperty('--app-vh', `${usable(app?.viewportHeight, fallback)}px`)
+
+    // Live height must track the keyboard, and clients disagree about whether their own
+    // viewportHeight does. Taking the smaller of the two readings is correct either way: whichever
+    // source noticed the keyboard wins, which is what keeps a sheet's footer — the Send button —
+    // above it instead of behind it.
+    root.style.setProperty('--app-vh', `${Math.min(usable(app?.viewportHeight, fallback), fallback)}px`)
+
+    // iOS positions `fixed` elements against the layout viewport, which it scrolls out from under
+    // the visual viewport when a field near the bottom takes focus. Publishing that offset lets an
+    // overlay compensate instead of drifting off screen.
+    const visual = window.visualViewport
+    root.style.setProperty('--app-vv-top', `${visual ? Math.max(0, Math.round(visual.offsetTop)) : 0}px`)
   }
 }
 

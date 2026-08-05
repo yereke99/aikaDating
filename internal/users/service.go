@@ -24,6 +24,16 @@ var (
 	ErrMessageTooLong   = errors.New("message exceeds 300 characters")
 )
 
+// Photo is one image of a public gallery. The thumbnail is what list cards load; the full URL is
+// reserved for the photo viewer.
+type Photo struct {
+	ID       string `json:"id"`
+	URL      string `json:"url"`
+	ThumbURL string `json:"thumb_url,omitempty"`
+	Width    int    `json:"width,omitempty"`
+	Height   int    `json:"height,omitempty"`
+}
+
 type PublicProfile struct {
 	ID          string  `json:"id"`
 	DisplayName string  `json:"display_name"`
@@ -34,12 +44,33 @@ type PublicProfile struct {
 	Purpose     string  `json:"purpose,omitempty"`
 	Bio         string  `json:"bio,omitempty"`
 	DistanceKM  float64 `json:"distance_km,omitempty"`
+	Photos      []Photo `json:"photos,omitempty"`
+	// Deadlines of the viewer's own timers towards this profile, so a list render already knows
+	// which actions are blocked without a request per card.
+	LikeNextAllowedAt    string `json:"like_next_allowed_at,omitempty"`
+	MessageNextAllowedAt string `json:"message_next_allowed_at,omitempty"`
 }
 
 type NearbyPage struct {
 	Users   []PublicProfile `json:"users"`
 	Page    int             `json:"page"`
 	HasMore bool            `json:"has_more"`
+	// ServerTime anchors every countdown to the server's clock instead of the device's.
+	ServerTime string `json:"server_time"`
+}
+
+func toPhotos(photos []database.Photo) []Photo {
+	if len(photos) == 0 {
+		return nil
+	}
+	result := make([]Photo, 0, len(photos))
+	for _, photo := range photos {
+		result = append(result, Photo{
+			ID: photo.ID, URL: photo.PublicURL, ThumbURL: photo.Thumbnail(),
+			Width: photo.Width, Height: photo.Height,
+		})
+	}
+	return result
 }
 
 type ProfileInput struct {
@@ -78,7 +109,9 @@ func (s *Service) UpdateProfile(ctx context.Context, current domain.User, input 
 	if gender != "male" && gender != "female" && gender != "other" {
 		return domain.User{}, ValidationError{Field: "gender", Code: "invalid_gender"}
 	}
-	birthDate, err := time.Parse("2006-01-02", strings.TrimSpace(input.BirthDate))
+	// Parsed as a calendar date in UTC and stored as one. No local-time conversion happens on
+	// either side, so a birthday can never shift by a day between the form and the database.
+	birthDate, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(input.BirthDate), time.UTC)
 	if err != nil {
 		return domain.User{}, ValidationError{Field: "birth_date", Code: "invalid_birth_date"}
 	}
@@ -98,12 +131,24 @@ func (s *Service) UpdateProfile(ctx context.Context, current domain.User, input 
 	if language != strings.ToLower(strings.TrimSpace(input.AppLanguage)) {
 		return domain.User{}, ValidationError{Field: "app_language", Code: "invalid_language"}
 	}
-	photoURL := strings.TrimSpace(input.CustomPhotoURL)
-	if photoURL != "" && !validHTTPSURL(photoURL) && !isManagedPhotoURL(photoURL, current.ID) {
-		return domain.User{}, ValidationError{Field: "custom_photo_url", Code: "invalid_photo_url"}
+	// The gallery owns the avatar once it has a photo: the primary photo is mirrored into
+	// custom_photo_url on every gallery change, so a profile save must not push a stale URL back
+	// over it. With an empty gallery the original rules still apply, which keeps pre-gallery
+	// accounts and any client that sets an external photo URL working unchanged.
+	photos, err := s.store.ListPhotos(ctx, current.ID)
+	if err != nil {
+		return domain.User{}, err
 	}
-	if len(photoURL) > 2048 {
-		return domain.User{}, ValidationError{Field: "custom_photo_url", Code: "invalid_photo_url"}
+	photoURL := strings.TrimSpace(input.CustomPhotoURL)
+	if len(photos) > 0 {
+		photoURL = photos[0].PublicURL
+	} else {
+		if photoURL != "" && !validHTTPSURL(photoURL) && !isManagedPhotoURL(photoURL, current.ID) {
+			return domain.User{}, ValidationError{Field: "custom_photo_url", Code: "invalid_photo_url"}
+		}
+		if len(photoURL) > 2048 {
+			return domain.User{}, ValidationError{Field: "custom_photo_url", Code: "invalid_photo_url"}
+		}
 	}
 	completed := photoURL != "" || (current.TelegramPhotoURL.Valid && current.TelegramPhotoURL.String != "")
 	if !completed {
@@ -131,11 +176,19 @@ func validHTTPSURL(raw string) bool {
 	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
 }
 
-var managedPhotoPattern = regexp.MustCompile(`^/profile_photo/([0-9a-f-]{36})\.jpg$`)
+// The two shapes a locally stored photo URL can take: the original flat avatar named after the
+// user, and a photo inside that user's own gallery directory.
+var (
+	managedPhotoPattern = regexp.MustCompile(`^/profile_photo/([0-9a-f-]{36})\.jpg$`)
+	galleryPhotoPattern = regexp.MustCompile(`^/profile_photo/users/([0-9a-f-]{36})/photos/[0-9a-f-]{36}(_t)?\.jpg$`)
+)
 
 func isManagedPhotoURL(raw, userID string) bool {
-	match := managedPhotoPattern.FindStringSubmatch(raw)
-	return len(match) == 2 && match[1] == userID
+	if match := managedPhotoPattern.FindStringSubmatch(raw); len(match) == 2 {
+		return match[1] == userID
+	}
+	match := galleryPhotoPattern.FindStringSubmatch(raw)
+	return len(match) == 3 && match[1] == userID
 }
 
 func ageAt(birthDate, now time.Time) int {
@@ -196,7 +249,56 @@ func (s *Service) Nearby(ctx context.Context, current domain.User, radiusKM floa
 	if err != nil {
 		return NearbyPage{}, err
 	}
-	return FilterNearby(current, candidates, radiusKM, gender, page, limit, s.now()), nil
+	now := s.now().UTC()
+	result := FilterNearby(current, candidates, radiusKM, gender, page, limit, now)
+	result.ServerTime = now.Format(time.RFC3339)
+	if err := s.decorate(ctx, current.ID, result.Users, now); err != nil {
+		return NearbyPage{}, err
+	}
+	return result, nil
+}
+
+// decorate attaches the galleries and the viewer's cooldown deadlines to a page of profiles. Both
+// are looked up in one query each, so a 2-second refresh costs two statements regardless of page
+// size.
+func (s *Service) decorate(ctx context.Context, viewerID string, profiles []PublicProfile, now time.Time) error {
+	if len(profiles) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		ids = append(ids, profile.ID)
+	}
+	galleries, err := s.store.ListPhotosFor(ctx, ids)
+	if err != nil {
+		return err
+	}
+	cooldowns, err := s.store.ActiveCooldowns(ctx, viewerID, now)
+	if err != nil {
+		return err
+	}
+	for index := range profiles {
+		profiles[index].Photos = toPhotos(galleries[profiles[index].ID])
+		active := cooldowns[profiles[index].ID]
+		if next, ok := active[database.ActionLike]; ok {
+			profiles[index].LikeNextAllowedAt = next.Format(time.RFC3339)
+		}
+		if next, ok := active[database.ActionMessage]; ok {
+			profiles[index].MessageNextAllowedAt = next.Format(time.RFC3339)
+		}
+	}
+	return nil
+}
+
+// PublicProfileWithPhotos loads one profile the way the nearby list would present it.
+func (s *Service) PublicProfileWithPhotos(ctx context.Context, viewerID string, user domain.User) (PublicProfile, error) {
+	now := s.now().UTC()
+	profile := toPublicProfile(user, now)
+	page := []PublicProfile{profile}
+	if err := s.decorate(ctx, viewerID, page, now); err != nil {
+		return PublicProfile{}, err
+	}
+	return page[0], nil
 }
 
 func ToPublicProfile(user domain.User, now time.Time) PublicProfile {
