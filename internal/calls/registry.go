@@ -46,6 +46,10 @@ const (
 	// StatusRinging means the invitation was delivered and nobody has answered yet. No camera or
 	// microphone has been opened on either side.
 	StatusRinging Status = "ringing"
+	// StatusReceiverOpened means the callee opened the Mini App from the call notification and is
+	// joining that exact invitation. The original ringing timeout no longer applies; accepting or
+	// setup failure decides the outcome from here.
+	StatusReceiverOpened Status = "receiver_opened"
 	// StatusAccepted means the callee agreed and the two sides are negotiating.
 	StatusAccepted Status = "accepted"
 	// StatusConnected means at least one side reported an established peer connection.
@@ -68,6 +72,7 @@ const (
 // Event types pushed to a participant's mailbox.
 const (
 	EventIncoming  = "incoming_call"
+	EventOpened    = "receiver_opened"
 	EventAccepted  = "call_accepted"
 	EventRejected  = "call_rejected"
 	EventCancelled = "call_cancelled"
@@ -94,6 +99,7 @@ type Call struct {
 	Caller     Peer       `json:"caller"`
 	Callee     Peer       `json:"callee"`
 	CreatedAt  time.Time  `json:"created_at"`
+	OpenedAt   *time.Time `json:"receiver_opened_at,omitempty"`
 	AcceptedAt *time.Time `json:"accepted_at,omitempty"`
 	EndedAt    *time.Time `json:"ended_at,omitempty"`
 }
@@ -244,6 +250,33 @@ func (r *Registry) Invite(caller, callee Peer) (*Call, error) {
 	return copyOf(call), nil
 }
 
+// Open records that the callee arrived through the existing invitation. It is idempotent while the
+// call is already in that joining state, so duplicate Telegram launch callbacks cannot create or
+// advance another call.
+func (r *Registry) Open(callID, userID string) (*Call, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	call, err := r.member(callID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if isCaller, _ := call.role(userID); isCaller {
+		return nil, ErrInvalidState
+	}
+	switch call.Status {
+	case StatusReceiverOpened:
+		return copyOf(call), nil
+	case StatusRinging:
+	default:
+		return nil, ErrInvalidState
+	}
+	now := r.now()
+	call.Status = StatusReceiverOpened
+	call.OpenedAt = &now
+	r.push(call.Caller.ID, Event{Type: EventOpened, CallID: call.ID, Peer: &call.Callee})
+	return copyOf(call), nil
+}
+
 // Accept moves a ringing call to accepted. Only the callee may do it.
 func (r *Registry) Accept(callID, userID string) (*Call, error) {
 	r.mu.Lock()
@@ -255,7 +288,7 @@ func (r *Registry) Accept(callID, userID string) (*Call, error) {
 	if isCaller, _ := call.role(userID); isCaller {
 		return nil, ErrInvalidState
 	}
-	if call.Status != StatusRinging {
+	if call.Status != StatusRinging && call.Status != StatusReceiverOpened {
 		return nil, ErrInvalidState
 	}
 	now := r.now()
@@ -278,7 +311,7 @@ func (r *Registry) Reject(callID, userID string) (*Call, error) {
 	if isCaller, _ := call.role(userID); isCaller {
 		return nil, ErrInvalidState
 	}
-	if call.Status != StatusRinging {
+	if call.Status != StatusRinging && call.Status != StatusReceiverOpened {
 		return nil, ErrInvalidState
 	}
 	r.finish(call, ReasonRejected, userID)
@@ -299,7 +332,7 @@ func (r *Registry) End(callID, userID string) (*Call, error) {
 	}
 	isCaller, _ := call.role(userID)
 	reason := ReasonHangUp
-	if call.Status == StatusRinging {
+	if call.Status == StatusRinging || call.Status == StatusReceiverOpened {
 		reason = ReasonCancelled
 		if !isCaller {
 			reason = ReasonRejected
@@ -384,6 +417,14 @@ func (r *Registry) Current(userID string) *Call {
 	return copyOf(r.activeCall(userID))
 }
 
+// Snapshot returns a call by ID without revealing it to clients. It is used by background work that
+// already holds server-side call context, such as the Telegram notification retry loop.
+func (r *Registry) Snapshot(callID string) *Call {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return copyOf(r.calls[callID])
+}
+
 // Present reports whether a user's client is currently holding the signalling channel open. It is
 // how the server decides that an invitation has to be delivered through Telegram instead of only
 // being queued for a Mini App nobody has open.
@@ -462,6 +503,10 @@ func (r *Registry) Sweep() {
 		case StatusRinging:
 			if now.Sub(call.CreatedAt) >= r.settings.InviteTimeout {
 				r.finish(call, ReasonTimeout, "")
+			}
+		case StatusReceiverOpened:
+			if call.OpenedAt != nil && now.Sub(*call.OpenedAt) >= r.settings.SetupTimeout {
+				r.finish(call, ReasonFailed, "")
 			}
 		case StatusAccepted:
 			if call.AcceptedAt != nil && now.Sub(*call.AcceptedAt) >= r.settings.SetupTimeout {

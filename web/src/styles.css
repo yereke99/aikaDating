@@ -1270,9 +1270,9 @@ select {
   place-items: center;
 }
 .sheet-tool.call {
-  border-color: var(--gold-soft);
-  background: var(--gold-soft);
-  color: var(--gold);
+  border-color: var(--line-soft);
+  background: transparent;
+  color: var(--success);
 }
 .sheet-tool:disabled {
   cursor: default;
@@ -1346,12 +1346,21 @@ select {
 /* --- message composer ----------------------------------------------------- */
 
 .message-input {
-  min-height: min(30vh, 150px);
+  min-height: min(150px, calc(var(--app-live-height) * 0.28));
+  max-height: calc(var(--app-live-height) * 0.42);
+  resize: none;
 }
 /* With the keyboard up there is far less room; the box gives it back rather
    than pushing the counter and the footer out of view. */
 .message-input.compact {
-  min-height: 84px;
+  min-height: min(96px, calc(var(--app-live-height) * 0.22));
+}
+.message-sheet .sheet-body {
+  min-height: 0;
+}
+.message-sheet .sheet-foot {
+  position: relative;
+  z-index: 1;
 }
 .composer-meta {
   display: flex;
@@ -1370,6 +1379,11 @@ select {
 
 .public-sheet .sheet-body {
   gap: var(--s-3);
+}
+.public-sheet .carousel {
+  height: min(calc(100vw - var(--page-l) - var(--page-r)), calc(var(--app-live-height) * 0.52), 430px);
+  min-height: min(240px, calc(var(--app-live-height) * 0.42));
+  aspect-ratio: auto;
 }
 .public-identity {
   display: grid;

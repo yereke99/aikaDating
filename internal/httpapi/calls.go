@@ -20,6 +20,13 @@ import (
 // used to ring someone repeatedly.
 const callInvitesPerMinute = 6
 
+const maxCallNotificationSends = 3
+
+var (
+	callNotificationRetryDelay = 4500 * time.Millisecond
+	callNotificationPollDelay  = 250 * time.Millisecond
+)
+
 type callConfigResponse struct {
 	Enabled bool `json:"enabled"`
 	// ICEServers is minted per request so a TURN credential is never part of the shipped bundle.
@@ -178,6 +185,7 @@ func (s *Server) createCall(w http.ResponseWriter, r *http.Request) {
 		s.writeCallError(w, r, caller, err)
 		return
 	}
+	s.logger.Info("call_created", zap.String("call_id", call.ID), zap.String("caller", caller.ID), zap.String("receiver", callee.ID), zap.String("status", string(call.Status)))
 	s.ringThroughTelegram(r, caller, callee, call)
 	s.writeCall(w, http.StatusCreated, caller.ID, call)
 }
@@ -191,36 +199,120 @@ func (s *Server) createCall(w http.ResponseWriter, r *http.Request) {
 // It runs in the background: the caller's request should not wait on the Bot API, and a delivery
 // failure does not invalidate a call that is legitimately ringing.
 func (s *Server) ringThroughTelegram(r *http.Request, caller, callee domain.User, call *calls.Call) {
-	if s.telegramCalls == nil || call == nil || call.Status != calls.StatusRinging || s.calls.Present(callee.ID) {
+	if s.telegramCalls == nil || call == nil || call.Status != calls.StatusRinging {
+		return
+	}
+	if s.calls.Present(callee.ID) {
+		s.logger.Info("receiver_presence_detected", zap.String("call_id", call.ID), zap.String("caller", caller.ID), zap.String("receiver", callee.ID))
 		return
 	}
 	// A fresh context: the caller's request finishes as soon as the invitation is created, and
 	// cancelling it must not cancel the notification.
 	go func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.cfg.Calls.InviteTimeout+5*time.Second)
 		defer cancel()
-		if err := s.telegramCalls.SendCallInvite(ctx, callee, caller, call.ID); err != nil {
-			s.logger.Info("could not ring the callee through Telegram", zap.String("call_id", call.ID), zap.Error(err))
-		}
+		s.runCallNotificationLoop(ctx, caller, callee, call.ID)
 	}()
 }
 
+func (s *Server) runCallNotificationLoop(ctx context.Context, caller, callee domain.User, callID string) {
+	var latestMessageID int64
+	deleteLatest := func() {
+		if latestMessageID == 0 || !callee.TelegramChatID.Valid {
+			latestMessageID = 0
+			return
+		}
+		messageID := latestMessageID
+		latestMessageID = 0
+		if err := s.telegramCalls.DeleteMessage(ctx, callee.TelegramChatID.Int64, messageID); err != nil {
+			s.logger.Info("could not delete Telegram call notification", zap.String("call_id", callID), zap.Int64("chat_id", callee.TelegramChatID.Int64), zap.Int64("message_id", messageID), zap.Error(err))
+			return
+		}
+		s.logger.Info("telegram_notification_deleted", zap.String("call_id", callID), zap.Int64("chat_id", callee.TelegramChatID.Int64), zap.Int64("message_id", messageID))
+	}
+
+	for attempt := 1; attempt <= maxCallNotificationSends; attempt++ {
+		if !s.callNotificationStillPending(callID) {
+			deleteLatest()
+			return
+		}
+		deleteLatest()
+		messageID, err := s.telegramCalls.SendCallInvite(ctx, callee, caller, callID)
+		if err != nil {
+			s.logger.Info("could not ring the callee through Telegram", zap.String("call_id", callID), zap.Int("attempt", attempt), zap.Error(err))
+			return
+		} else {
+			latestMessageID = messageID
+			s.logger.Info("telegram_notification_sent", zap.String("call_id", callID), zap.String("caller", caller.ID), zap.String("receiver", callee.ID), zap.Int("attempt", attempt), zap.Int64("message_id", messageID))
+		}
+		if attempt == maxCallNotificationSends {
+			break
+		}
+		if !s.waitForNotificationRetry(ctx, callID, callNotificationRetryDelay) {
+			deleteLatest()
+			return
+		}
+	}
+
+	ticker := time.NewTicker(callNotificationPollDelay)
+	defer ticker.Stop()
+	for {
+		if !s.callNotificationStillPending(callID) {
+			deleteLatest()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Server) waitForNotificationRetry(ctx context.Context, callID string, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	ticker := time.NewTicker(callNotificationPollDelay)
+	defer timer.Stop()
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return s.callNotificationStillPending(callID)
+		case <-ticker.C:
+			if !s.callNotificationStillPending(callID) {
+				return false
+			}
+		}
+	}
+}
+
+func (s *Server) callNotificationStillPending(callID string) bool {
+	call := s.calls.Snapshot(callID)
+	return call != nil && call.Status == calls.StatusRinging
+}
+
+func (s *Server) openCall(w http.ResponseWriter, r *http.Request) {
+	s.callTransition(w, r, "receiver_opened", s.calls.Open)
+}
+
 func (s *Server) acceptCall(w http.ResponseWriter, r *http.Request) {
-	s.callTransition(w, r, s.calls.Accept)
+	s.callTransition(w, r, "call_accepted", s.calls.Accept)
 }
 
 func (s *Server) rejectCall(w http.ResponseWriter, r *http.Request) {
-	s.callTransition(w, r, s.calls.Reject)
+	s.callTransition(w, r, "call_rejected", s.calls.Reject)
 }
 
 func (s *Server) endCall(w http.ResponseWriter, r *http.Request) {
-	s.callTransition(w, r, s.calls.End)
+	s.callTransition(w, r, "call_ended", s.calls.End)
 }
 
 // callTransition runs one state change on a call the authenticated user belongs to. Membership is
 // resolved inside the registry from the call itself, so a request can only ever affect a call the
 // user is actually part of.
-func (s *Server) callTransition(w http.ResponseWriter, r *http.Request, action func(callID, userID string) (*calls.Call, error)) {
+func (s *Server) callTransition(w http.ResponseWriter, r *http.Request, event string, action func(callID, userID string) (*calls.Call, error)) {
 	user := currentUser(r)
 	if !s.callsAvailable(w, user) {
 		return
@@ -236,6 +328,7 @@ func (s *Server) callTransition(w http.ResponseWriter, r *http.Request, action f
 		s.writeCallError(w, r, user, err)
 		return
 	}
+	s.logger.Info(event, zap.String("call_id", call.ID), zap.String("actor", user.ID), zap.String("caller", call.Caller.ID), zap.String("receiver", call.Callee.ID), zap.String("status", string(call.Status)), zap.String("reason", call.Reason))
 	s.writeCall(w, http.StatusOK, user.ID, call)
 }
 
@@ -276,6 +369,11 @@ func (s *Server) updateCallState(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeCallError(w, r, user, err)
 		return
+	}
+	if request.State == "connected" {
+		s.logger.Info("call_connected", zap.String("call_id", call.ID), zap.String("actor", user.ID), zap.String("caller", call.Caller.ID), zap.String("receiver", call.Callee.ID), zap.String("status", string(call.Status)))
+	} else {
+		s.logger.Info("call_failed", zap.String("call_id", call.ID), zap.String("actor", user.ID), zap.String("caller", call.Caller.ID), zap.String("receiver", call.Callee.ID), zap.String("status", string(call.Status)), zap.String("reason", call.Reason))
 	}
 	s.writeCall(w, http.StatusOK, user.ID, call)
 }
@@ -330,6 +428,12 @@ func (s *Server) signalCall(w http.ResponseWriter, r *http.Request) {
 		s.writeCallError(w, r, user, err)
 		return
 	}
+	logEvent := map[string]string{
+		calls.EventOffer:     "webrtc_offer_sent",
+		calls.EventAnswer:    "webrtc_answer_sent",
+		calls.EventCandidate: "ice_candidate_sent",
+	}[request.Type]
+	s.logger.Info(logEvent, zap.String("call_id", callID), zap.String("sender", user.ID))
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 

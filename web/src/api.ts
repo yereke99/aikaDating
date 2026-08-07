@@ -129,6 +129,7 @@ export const api = {
    */
   callEvents: (after: number, signal?: AbortSignal) => request<CallEventsResponse>(`/api/calls/events?after=${after}`, { signal }),
   createCall: (userID: string) => request<CallResponse>('/api/calls', { method: 'POST', body: JSON.stringify({ user_id: userID }) }),
+  openCall: (callID: string) => request<CallResponse>(`/api/calls/${encodeURIComponent(callID)}/open`, { method: 'POST' }),
   acceptCall: (callID: string) => request<CallResponse>(`/api/calls/${encodeURIComponent(callID)}/accept`, { method: 'POST' }),
   rejectCall: (callID: string) => request<CallResponse>(`/api/calls/${encodeURIComponent(callID)}/reject`, { method: 'POST' }),
   endCall: (callID: string) => request<CallResponse>(`/api/calls/${encodeURIComponent(callID)}/end`, { method: 'POST' }),

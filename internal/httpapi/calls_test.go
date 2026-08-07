@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -123,6 +124,29 @@ func TestCallActionsOfAnotherPairAreNotFound(t *testing.T) {
 		if len(events) != 0 {
 			t.Fatalf("%s received foreign signalling: %+v", userID, events)
 		}
+	}
+}
+
+func TestOpeningCallIsScopedToAuthenticatedCallee(t *testing.T) {
+	environment := testEnvironment(t, 123, 999)
+	target := actors(t, environment, 123)
+
+	invite := post(t, environment.router, "/api/calls", `{"user_id":"`+target.ID+`"}`)
+	call := decodeInto[callResponse](t, invite).Call
+
+	if response := post(t, environment.router, "/api/calls/"+call.ID+"/open", ""); response.Code != http.StatusConflict {
+		t.Fatalf("caller open status = %d, want 409; body = %s", response.Code, response.Body.String())
+	}
+	opened, err := environment.calls.Open(call.ID, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.Status != calls.StatusReceiverOpened {
+		t.Fatalf("opened call = %+v", opened)
+	}
+	response := post(t, environment.router, "/api/calls/"+call.ID+"/accept", "")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("caller accept status = %d, want 409; body = %s", response.Code, response.Body.String())
 	}
 }
 
@@ -288,6 +312,56 @@ func TestAbsentCalleeIsRungThroughTelegram(t *testing.T) {
 	}
 }
 
+func TestTelegramCallNotificationsAreReplacedAndCancelled(t *testing.T) {
+	environment := testEnvironment(t, 123, 999)
+	target := actors(t, environment, 123)
+	target = giveChatID(t, environment, target, 777)
+	withFastCallNotifications(t)
+
+	invite := post(t, environment.router, "/api/calls", `{"user_id":"`+target.ID+`"}`)
+	if invite.Code != http.StatusCreated {
+		t.Fatalf("invite status = %d, body = %s", invite.Code, invite.Body.String())
+	}
+	call := decodeInto[callResponse](t, invite).Call
+
+	waitForFakeTelegram(t, environment.telegram, func(rings, deletions []string) bool {
+		return countRings(rings, target.ID) == 3 && len(deletions) == 2
+	})
+	if response := post(t, environment.router, "/api/calls/"+call.ID+"/end", ""); response.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d, body = %s", response.Code, response.Body.String())
+	}
+	waitForFakeTelegram(t, environment.telegram, func(rings, deletions []string) bool {
+		return countRings(rings, target.ID) == 3 && len(deletions) == 3
+	})
+}
+
+func TestTelegramCallNotificationsStopWhenReceiverOpens(t *testing.T) {
+	environment := testEnvironment(t, 123, 999)
+	target := actors(t, environment, 123)
+	target = giveChatID(t, environment, target, 888)
+	withFastCallNotifications(t)
+
+	invite := post(t, environment.router, "/api/calls", `{"user_id":"`+target.ID+`"}`)
+	if invite.Code != http.StatusCreated {
+		t.Fatalf("invite status = %d, body = %s", invite.Code, invite.Body.String())
+	}
+	call := decodeInto[callResponse](t, invite).Call
+	waitForFakeTelegram(t, environment.telegram, func(rings, _ []string) bool {
+		return countRings(rings, target.ID) == 1
+	})
+	if _, err := environment.calls.Open(call.ID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitForFakeTelegram(t, environment.telegram, func(rings, deletions []string) bool {
+		return countRings(rings, target.ID) == 1 && len(deletions) == 1
+	})
+	time.Sleep(3 * callNotificationRetryDelay)
+	rings, _ := environment.telegram.snapshot()
+	if countRings(rings, target.ID) != 1 {
+		t.Fatalf("notification loop continued after receiver opened: %+v", rings)
+	}
+}
+
 func TestPresentCalleeIsNotMessaged(t *testing.T) {
 	environment := testEnvironment(t, 123, 999)
 	target := actors(t, environment, 123)
@@ -301,4 +375,51 @@ func TestPresentCalleeIsNotMessaged(t *testing.T) {
 	if rings := environment.telegram.ringsFor(target.ID); len(rings) != 0 {
 		t.Fatalf("a listening callee was messaged as well: %+v", rings)
 	}
+}
+
+func giveChatID(t *testing.T, environment environment, user domain.User, chatID int64) domain.User {
+	t.Helper()
+	updated, err := environment.store.UpsertTelegramUser(context.Background(), domain.TelegramProfile{
+		UserID: user.TelegramUserID, ChatID: sql.NullInt64{Int64: chatID, Valid: true},
+		FirstName: user.FirstName.String, LastName: user.LastName.String, LanguageCode: user.AppLanguage, PhotoURLKnown: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return updated
+}
+
+func withFastCallNotifications(t *testing.T) {
+	t.Helper()
+	previousDelay, previousPoll := callNotificationRetryDelay, callNotificationPollDelay
+	callNotificationRetryDelay = 5 * time.Millisecond
+	callNotificationPollDelay = time.Millisecond
+	t.Cleanup(func() {
+		callNotificationRetryDelay = previousDelay
+		callNotificationPollDelay = previousPoll
+	})
+}
+
+func waitForFakeTelegram(t *testing.T, bot *fakeTelegram, ready func(rings, deletions []string) bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		rings, deletions := bot.snapshot()
+		if ready(rings, deletions) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	rings, deletions := bot.snapshot()
+	t.Fatalf("telegram state did not settle: rings=%+v deletions=%+v", rings, deletions)
+}
+
+func countRings(rings []string, userID string) int {
+	count := 0
+	for _, ring := range rings {
+		if strings.HasPrefix(ring, userID+":") {
+			count++
+		}
+	}
+	return count
 }

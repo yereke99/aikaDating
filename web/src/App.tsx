@@ -4,7 +4,7 @@ import { useCallCenter } from './calls/useCallCenter'
 import { Avatar } from './components/Avatar'
 import { CallScreen } from './components/CallScreen'
 import { DateField } from './components/DateField'
-import { BlockIcon, VideoCallIcon } from './components/icons'
+import { BlockIcon, PhoneIcon } from './components/icons'
 import { MessageSheet } from './components/MessageSheet'
 import { PhotoCarousel, PhotoViewer } from './components/PhotoCarousel'
 import { PhotoManager } from './components/PhotoManager'
@@ -536,7 +536,7 @@ function PublicProfileSheet({
                 title={t('videoCall')}
                 onClick={onCall}
               >
-                <VideoCallIcon />
+                <PhoneIcon />
               </button>
             )}
           </div>
@@ -1138,6 +1138,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('nearby')
   const [toast, setToast] = useState('')
   const [deepProfile, setDeepProfile] = useState<PublicProfile | null>(null)
+  const [launchCallID, setLaunchCallID] = useState('')
   const toastTimer = useRef(0)
 
   useKeyboardAwareFocus()
@@ -1159,10 +1160,13 @@ export default function App() {
         setMe(user)
         document.documentElement.lang = user.app_language
         const parameter = startParameter(telegramApp)
-        const match = /^profile_([0-9a-f-]{36})$/.exec(parameter)
-        if (match) {
+        const callMatch = /^call_([0-9a-f-]{36})$/.exec(parameter)
+        const profileMatch = /^profile_([0-9a-f-]{36})$/.exec(parameter)
+        if (callMatch) {
+          setLaunchCallID(callMatch[1])
+        } else if (profileMatch) {
           try {
-            setDeepProfile(await api.publicProfile(match[1]))
+            setDeepProfile(await api.publicProfile(profileMatch[1]))
           } catch {
             /* unavailable profiles stay hidden */
           }
@@ -1193,7 +1197,10 @@ export default function App() {
   // neither place nor receive a call.
   const language = me?.app_language ?? 'ru'
   const translate = useCallback((key: MessageKey) => translator(language)(key), [language])
-  const calls = useCallCenter(me?.is_profile_completed ? me.id : undefined, notify, translate)
+  const clearLaunchCall = useCallback((callID: string) => {
+    setLaunchCallID((current) => (current === callID ? '' : current))
+  }, [])
+  const calls = useCallCenter(me?.is_profile_completed ? me.id : undefined, notify, translate, launchCallID, clearLaunchCall)
 
   if (status === 'loading') return <FullPageState loading title="AikaBot" />
   if (status === 'error' || !me)

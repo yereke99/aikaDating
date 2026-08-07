@@ -140,6 +140,46 @@ func TestOnlyTheCalleeMayAccept(t *testing.T) {
 	}
 }
 
+func TestReceiverOpenMovesRingingCallIntoJoiningState(t *testing.T) {
+	registry, clock := testRegistry(t)
+	call, err := registry.Invite(alice, bob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain(t, registry, "bob", 0)
+	if _, err := registry.Open(call.ID, "alice"); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("caller opening own invitation = %v, want ErrInvalidState", err)
+	}
+
+	opened, err := registry.Open(call.ID, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.Status != StatusReceiverOpened || opened.OpenedAt == nil {
+		t.Fatalf("opened call = %+v", opened)
+	}
+	events, cursor := drain(t, registry, "alice", 0)
+	if len(events) != 1 || events[0].Type != EventOpened || events[0].CallID != call.ID {
+		t.Fatalf("alice events = %+v", events)
+	}
+	if again, err := registry.Open(call.ID, "bob"); err != nil || again.Status != StatusReceiverOpened {
+		t.Fatalf("second open = %+v, %v", again, err)
+	}
+	if events, _ := drain(t, registry, "alice", cursor); len(events) != 0 {
+		t.Fatalf("duplicate open re-notified the caller: %+v", events)
+	}
+
+	*clock = clock.Add(testSettings().InviteTimeout + time.Second)
+	registry.Sweep()
+	if current := registry.Current("alice"); current == nil || current.Status != StatusReceiverOpened {
+		t.Fatalf("receiver-opened call was swept by invite timeout: %+v", current)
+	}
+	accepted, err := registry.Accept(call.ID, "bob")
+	if err != nil || accepted.Status != StatusAccepted {
+		t.Fatalf("accept after open = %+v, %v", accepted, err)
+	}
+}
+
 func TestRejectEndsTheCallAndTellsTheCaller(t *testing.T) {
 	registry, _ := testRegistry(t)
 	call, _ := registry.Invite(alice, bob)
@@ -320,6 +360,21 @@ func TestSetupTimeoutEndsACallThatNeverConnects(t *testing.T) {
 		*clock = clock.Add(10 * time.Second)
 		registry.Touch("alice")
 		registry.Touch("bob")
+		registry.Sweep()
+	}
+	if registry.calls[call.ID].Reason != ReasonFailed {
+		t.Fatalf("reason = %q, want %q", registry.calls[call.ID].Reason, ReasonFailed)
+	}
+}
+
+func TestReceiverOpenedCallHasAJoiningDeadline(t *testing.T) {
+	registry, clock := testRegistry(t)
+	call, _ := registry.Invite(alice, bob)
+	if _, err := registry.Open(call.ID, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	for step := 0; step < 7; step++ {
+		*clock = clock.Add(10 * time.Second)
 		registry.Sweep()
 	}
 	if registry.calls[call.ID].Reason != ReasonFailed {

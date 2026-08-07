@@ -18,6 +18,8 @@ export type CallPhase =
   | 'idle'
   /** We invited someone and are waiting for them to accept. No device is open yet. */
   | 'outgoing'
+  /** The callee opened the Mini App from Telegram and is joining the invitation. */
+  | 'joining'
   /** Someone is calling us. No device is open yet — that is what accepting is for. */
   | 'incoming'
   /** Accepted; asking the platform for the camera and microphone. */
@@ -97,7 +99,13 @@ export interface CallCenter {
   flipCamera: () => void
 }
 
-export function useCallCenter(userID: string | undefined, notify: (text: string) => void, translate: (key: MessageKey) => string): CallCenter {
+export function useCallCenter(
+  userID: string | undefined,
+  notify: (text: string) => void,
+  translate: (key: MessageKey) => string,
+  launchCallID = '',
+  onLaunchCallHandled?: (callID: string) => void,
+): CallCenter {
   const [enabled, setEnabled] = useState(false)
   const [view, setView] = useState<CallView>(IDLE)
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
@@ -120,6 +128,7 @@ export function useCallCenter(userID: string | undefined, notify: (text: string)
   const lingerTimer = useRef(0)
   const inviteTimer = useRef(0)
   const inviteTimeoutMs = useRef(60_000)
+  const handledLaunchCall = useRef('')
   const phase = useRef<CallPhase>('idle')
   phase.current = view.phase
 
@@ -272,6 +281,17 @@ export function useCallCenter(userID: string | undefined, notify: (text: string)
           setView({ ...IDLE, phase: 'incoming', callID: event.call_id, peer: event.peer ?? null, outgoing: false })
           return
         }
+        case 'receiver_opened': {
+          if (current.id !== event.call_id || !current.outgoing) return
+          window.clearTimeout(inviteTimer.current)
+          inviteTimer.current = 0
+          setView((existing) =>
+            existing.callID === event.call_id && existing.phase === 'outgoing'
+              ? { ...existing, phase: 'joining', peer: event.peer ?? existing.peer }
+              : existing,
+          )
+          return
+        }
         case 'call_accepted': {
           if (current.id !== event.call_id || !current.outgoing) return
           window.clearTimeout(inviteTimer.current)
@@ -352,6 +372,43 @@ export function useCallCenter(userID: string | undefined, notify: (text: string)
     [finish, handleEvent],
   )
 
+  const resumeLaunchCall = useCallback(
+    async (callID: string) => {
+      if (!userID || phase.current !== 'idle') {
+        onLaunchCallHandled?.(callID)
+        return
+      }
+      setBusy(true)
+      let openedLocally = false
+      try {
+        const opened = await api.openCall(callID)
+        const call = opened.call
+        if (call.callee.id !== userID || (call.status !== 'ringing' && call.status !== 'receiver_opened')) {
+          notify(translate('callFailed'))
+          return
+        }
+        ice.current = opened.ice_servers ?? ice.current
+        active.current = { id: call.id, outgoing: false }
+        openedLocally = true
+        clearTimers()
+        haptic('tap')
+        setView({ ...IDLE, phase: 'preparing', callID: call.id, peer: call.caller, outgoing: false })
+
+        const accepted = await api.acceptCall(call.id)
+        ice.current = accepted.ice_servers ?? ice.current
+        await negotiate(call.id, false)
+      } catch (error) {
+        haptic('error')
+        if (openedLocally) finish('failed')
+        notify(error instanceof APIError ? error.message : translate('callFailed'))
+      } finally {
+        setBusy(false)
+        onLaunchCallHandled?.(callID)
+      }
+    },
+    [clearTimers, finish, negotiate, notify, onLaunchCallHandled, translate, userID],
+  )
+
   // Read the feature's availability once. A client that cannot do WebRTC at all never shows a
   // call button, rather than offering one that fails at the last step.
   //
@@ -370,20 +427,37 @@ export function useCallCenter(userID: string | undefined, notify: (text: string)
         inviteTimeoutMs.current = Math.max(15, config.invite_timeout_seconds) * 1000
         const ready = config.enabled && supportsCalls()
         setEnabled(ready)
-        if (!ready || !config.current || phase.current !== 'idle') return
+        if (!ready || phase.current !== 'idle') return
+        if (launchCallID && handledLaunchCall.current !== launchCallID) {
+          handledLaunchCall.current = launchCallID
+          void resumeLaunchCall(launchCallID)
+          return
+        }
+        if (!config.current) return
         const call = config.current
-        // Only a still-ringing invitation can be resumed. A call that was already accepted has a
+        // Only pre-negotiation invitations can be resumed. A call that was already accepted has a
         // peer connection that did not survive the reload, so it is left for the server to reap.
-        if (call.status !== 'ringing' || call.callee.id !== userID) return
-        active.current = { id: call.id, outgoing: false }
-        haptic('warning')
-        setView({ ...IDLE, phase: 'incoming', callID: call.id, peer: call.caller, outgoing: false })
+        if (call.status !== 'ringing' && call.status !== 'receiver_opened') return
+        if (call.callee.id === userID) {
+          active.current = { id: call.id, outgoing: false }
+          haptic('warning')
+          setView({ ...IDLE, phase: 'incoming', callID: call.id, peer: call.caller, outgoing: false })
+          return
+        }
+        if (call.caller.id === userID) {
+          active.current = { id: call.id, outgoing: true }
+          clearTimers()
+          setView({ ...IDLE, phase: call.status === 'receiver_opened' ? 'joining' : 'outgoing', callID: call.id, peer: call.callee, outgoing: true })
+          if (call.status === 'ringing') {
+            inviteTimer.current = window.setTimeout(() => finish('timeout'), inviteTimeoutMs.current + 10_000)
+          }
+        }
       })
       .catch(() => undefined)
     return () => {
       cancelled = true
     }
-  }, [userID])
+  }, [clearTimers, finish, launchCallID, resumeLaunchCall, userID])
 
   // The channel runs while the app is on screen, and keeps running through a call even if the
   // client reports itself hidden — dropping it there would make the server declare us gone.
@@ -473,7 +547,7 @@ export function useCallCenter(userID: string | undefined, notify: (text: string)
       return
     }
     setBusy(true)
-    void leave(callID, 'end', view.outgoing && phase.current === 'outgoing' ? 'cancelled' : 'hangup').finally(() => setBusy(false))
+    void leave(callID, 'end', view.outgoing && (phase.current === 'outgoing' || phase.current === 'joining') ? 'cancelled' : 'hangup').finally(() => setBusy(false))
   }, [finish, leave, view.outgoing])
 
   const dismiss = useCallback(() => {

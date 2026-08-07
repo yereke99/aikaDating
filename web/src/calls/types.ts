@@ -1,6 +1,6 @@
 /** Wire types for one-to-one video calls. They mirror internal/calls exactly. */
 
-export type CallStatus = 'ringing' | 'accepted' | 'connected' | 'ended'
+export type CallStatus = 'ringing' | 'receiver_opened' | 'accepted' | 'connected' | 'ended'
 
 export type CallEndReason = 'hangup' | 'rejected' | 'cancelled' | 'timeout' | 'failed' | 'peer_disconnected'
 
@@ -23,6 +23,7 @@ export interface CallRecord {
 
 export type CallEventType =
   | 'incoming_call'
+  | 'receiver_opened'
   | 'call_accepted'
   | 'call_rejected'
   | 'call_cancelled'

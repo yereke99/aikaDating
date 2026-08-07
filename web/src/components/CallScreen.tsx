@@ -43,6 +43,7 @@ function CallPrompt({ call, language }: { call: CallCenter; language: Language }
 
   const status: MessageKey = (() => {
     if (call.phase === 'ended') return call.failure || endedMessage(call.endReason)
+    if (call.phase === 'joining') return 'callConnecting'
     return call.phase === 'incoming' ? 'incomingCall' : 'callWaiting'
   })()
 
@@ -52,7 +53,7 @@ function CallPrompt({ call, language }: { call: CallCenter; language: Language }
         <Avatar src={call.peer?.photo_url} name={name} size="large" />
         <h2>{name}</h2>
         <p role="status">{t(status)}</p>
-        {call.phase === 'outgoing' && <span className="call-pulse" aria-hidden="true" />}
+        {(call.phase === 'outgoing' || call.phase === 'joining') && <span className="call-pulse" aria-hidden="true" />}
       </div>
       <div className="call-prompt-actions">
         {call.phase === 'incoming' && (
@@ -67,7 +68,7 @@ function CallPrompt({ call, language }: { call: CallCenter; language: Language }
             </button>
           </>
         )}
-        {call.phase === 'outgoing' && (
+        {(call.phase === 'outgoing' || call.phase === 'joining') && (
           <button type="button" className="call-action decline" disabled={call.busy} onClick={call.hangUp} aria-label={t('cancelCall')}>
             <i aria-hidden="true"><CallEndIcon /></i>
             <span>{t('cancelCall')}</span>

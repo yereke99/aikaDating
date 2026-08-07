@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,16 +30,26 @@ import (
 // fakeTelegram stands in for the bot client. It also implements the optional call-ringing
 // interface, so the "notify a callee who is not in the app" path is exercised rather than skipped.
 type fakeTelegram struct {
-	mu    sync.Mutex
-	rings []string
+	mu        sync.Mutex
+	rings     []string
+	deletions []string
+	nextID    int64
 }
 
 func (*fakeTelegram) SendLike(context.Context, domain.User, domain.User, string) error { return nil }
 
-func (f *fakeTelegram) SendCallInvite(_ context.Context, recipient, _ domain.User, callID string) error {
+func (f *fakeTelegram) SendCallInvite(_ context.Context, recipient, _ domain.User, callID string) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.nextID++
 	f.rings = append(f.rings, recipient.ID+":"+callID)
+	return f.nextID, nil
+}
+
+func (f *fakeTelegram) DeleteMessage(_ context.Context, chatID, messageID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletions = append(f.deletions, strconv.FormatInt(chatID, 10)+":"+strconv.FormatInt(messageID, 10))
 	return nil
 }
 
@@ -59,6 +70,12 @@ func (f *fakeTelegram) ringsFor(userID string) []string {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return nil
+}
+
+func (f *fakeTelegram) snapshot() (rings, deletions []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.rings...), append([]string(nil), f.deletions...)
 }
 
 // environment is one wired-up server plus the pieces a test needs to arrange state directly.

@@ -99,10 +99,10 @@ func (c *Client) SendLike(ctx context.Context, recipient, sender domain.User, me
 		}, nil)
 		var telegramErr *apiError
 		if errors.As(err, &telegramErr) && telegramErr.StatusCode == http.StatusBadRequest {
-			err = c.sendText(ctx, recipient.TelegramChatID.Int64, text, markup)
+			_, err = c.sendText(ctx, recipient.TelegramChatID.Int64, text, markup)
 		}
 	} else {
-		err = c.sendText(ctx, recipient.TelegramChatID.Int64, text, markup)
+		_, err = c.sendText(ctx, recipient.TelegramChatID.Int64, text, markup)
 	}
 	if isRecipientError(err) {
 		return ErrRecipientUnavailable
@@ -117,9 +117,9 @@ func (c *Client) SendLike(ctx context.Context, recipient, sender domain.User, me
 // `startapp` deep link rather than a plain web_app button: that is the form Telegram opens as the
 // Main Mini App, which is what restores the app's own fullscreen presentation. The call ID travels
 // in the start parameter so the app can go straight to the ringing screen.
-func (c *Client) SendCallInvite(ctx context.Context, recipient, caller domain.User, callID string) error {
+func (c *Client) SendCallInvite(ctx context.Context, recipient, caller domain.User, callID string) (int64, error) {
 	if !recipient.TelegramChatID.Valid {
-		return ErrRecipientUnavailable
+		return 0, ErrRecipientUnavailable
 	}
 	markup := inlineKeyboardMarkup{InlineKeyboard: [][]inlineKeyboardButton{{{
 		Text: answerButtonText(recipient.AppLanguage),
@@ -127,11 +127,11 @@ func (c *Client) SendCallInvite(ctx context.Context, recipient, caller domain.Us
 		// limits, so the ID survives the round trip unchanged.
 		URL: fmt.Sprintf("https://t.me/%s?startapp=call_%s", c.botUsername, callID),
 	}}}}
-	err := c.sendText(ctx, recipient.TelegramChatID.Int64, FormatCallNotification(recipient.AppLanguage, caller), markup)
+	messageID, err := c.sendText(ctx, recipient.TelegramChatID.Int64, FormatCallNotification(recipient.AppLanguage, caller), markup)
 	if isRecipientError(err) {
-		return ErrRecipientUnavailable
+		return 0, ErrRecipientUnavailable
 	}
-	return err
+	return messageID, err
 }
 
 // FormatCallNotification is the ringing message, in the recipient's own app language.
@@ -158,13 +158,29 @@ func answerButtonText(language string) string {
 	}
 }
 
-func (c *Client) sendText(ctx context.Context, chatID int64, text string, markup inlineKeyboardMarkup) error {
-	return c.call(ctx, "sendMessage", map[string]any{
+func (c *Client) DeleteMessage(ctx context.Context, chatID, messageID int64) error {
+	if chatID == 0 || messageID == 0 {
+		return nil
+	}
+	err := c.call(ctx, "deleteMessage", map[string]any{
+		"chat_id":    chatID,
+		"message_id": messageID,
+	}, nil)
+	if isRecipientError(err) {
+		return ErrRecipientUnavailable
+	}
+	return err
+}
+
+func (c *Client) sendText(ctx context.Context, chatID int64, text string, markup inlineKeyboardMarkup) (int64, error) {
+	var sent message
+	err := c.call(ctx, "sendMessage", map[string]any{
 		"chat_id":      chatID,
 		"text":         text,
 		"parse_mode":   "HTML",
 		"reply_markup": markup,
-	}, nil)
+	}, &sent)
+	return sent.MessageID, err
 }
 
 func isRecipientError(err error) bool {
@@ -356,7 +372,7 @@ func (c *Client) handleUpdate(ctx context.Context, item update) {
 		Text:   openButtonText(language),
 		WebApp: &webApp{URL: c.miniAppURL},
 	}}}}
-	if err := c.sendText(ctx, item.Message.Chat.ID, welcomeText(language), markup); err != nil && !isRecipientError(err) {
+	if _, err := c.sendText(ctx, item.Message.Chat.ID, welcomeText(language), markup); err != nil && !isRecipientError(err) {
 		c.logger.Warn("Could not send bot welcome", zap.Error(err))
 	}
 	_ = c.setChatMenu(ctx, item.Message.Chat.ID, language)

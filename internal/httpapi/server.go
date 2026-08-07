@@ -36,7 +36,8 @@ type likeSender interface {
 // open. It is a separate interface because it is optional: a deployment without it still works,
 // it simply cannot reach an absent callee.
 type callRinger interface {
-	SendCallInvite(ctx context.Context, recipient, caller domain.User, callID string) error
+	SendCallInvite(ctx context.Context, recipient, caller domain.User, callID string) (int64, error)
+	DeleteMessage(ctx context.Context, chatID, messageID int64) error
 }
 
 type Server struct {
@@ -114,6 +115,7 @@ func (s *Server) Router() http.Handler {
 				call.Get("/config", s.callConfig)
 				call.Get("/events", s.callEvents)
 				call.Post("/", s.createCall)
+				call.Post("/{callID}/open", s.openCall)
 				call.Post("/{callID}/accept", s.acceptCall)
 				call.Post("/{callID}/reject", s.rejectCall)
 				call.Post("/{callID}/end", s.endCall)

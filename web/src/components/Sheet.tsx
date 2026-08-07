@@ -79,10 +79,17 @@ export function useKeyboardOpen(): boolean {
   useEffect(() => {
     const viewport = window.visualViewport
     if (!viewport) return undefined
-    const sync = () => setOpen(window.innerHeight - viewport.height > 120)
+    const sync = () => {
+      const covered = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
+      setOpen(covered > 120 || viewport.height < window.innerHeight * 0.78)
+    }
     sync()
     viewport.addEventListener('resize', sync)
-    return () => viewport.removeEventListener('resize', sync)
+    viewport.addEventListener('scroll', sync)
+    return () => {
+      viewport.removeEventListener('resize', sync)
+      viewport.removeEventListener('scroll', sync)
+    }
   }, [])
   return open
 }
