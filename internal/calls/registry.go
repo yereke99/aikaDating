@@ -152,7 +152,12 @@ type mailbox struct {
 	firstSeq int64
 	seq      int64
 	events   []Event
+	// lastSeen is presence: when a client last held the channel open. It stays zero for a mailbox
+	// that only exists because something was queued for a user who has never polled.
 	lastSeen time.Time
+	// createdAt is age, used for cleanup, so a mailbox holding an undelivered event is never
+	// dropped just because its owner has not polled yet.
+	createdAt time.Time
 	// notify is closed and replaced whenever an event is appended, which wakes every parked poll
 	// at once without keeping a per-waiter list.
 	notify chan struct{}
@@ -379,6 +384,30 @@ func (r *Registry) Current(userID string) *Call {
 	return copyOf(r.activeCall(userID))
 }
 
+// Present reports whether a user's client is currently holding the signalling channel open. It is
+// how the server decides that an invitation has to be delivered through Telegram instead of only
+// being queued for a Mini App nobody has open.
+func (r *Registry) Present(userID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.absent(userID, r.now())
+}
+
+// EndBetween hangs up any live call between two people. Blocking someone ends the conversation
+// that is happening right now, not just the next one.
+func (r *Registry) EndBetween(first, second string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	call := r.activeCall(first)
+	if call == nil {
+		return
+	}
+	if _, member := call.role(second); !member {
+		return
+	}
+	r.finish(call, ReasonHangUp, "")
+}
+
 // Poll returns the events after `after`, parking for up to `wait` when there are none.
 //
 // It returns the instant an event is queued rather than on a timer, which is what keeps
@@ -451,10 +480,19 @@ func (r *Registry) Sweep() {
 			delete(r.calls, id)
 		}
 	}
-	// Mailboxes of users who stopped polling long ago are dropped, so the maps cannot grow without
-	// bound in a long-running process.
+	// Mailboxes that nobody has touched in a long time are dropped, so the maps cannot grow
+	// without bound in a long-running process. Age is measured from the later of the last poll and
+	// creation, so an invitation queued for someone who has not opened the app yet survives long
+	// enough for them to arrive through the Telegram notification.
 	for userID, box := range r.boxes {
-		if _, busy := r.active[userID]; !busy && now.Sub(box.lastSeen) > 10*time.Minute {
+		if _, busy := r.active[userID]; busy {
+			continue
+		}
+		idleSince := box.lastSeen
+		if idleSince.Before(box.createdAt) {
+			idleSince = box.createdAt
+		}
+		if now.Sub(idleSince) > 10*time.Minute {
 			delete(r.boxes, userID)
 		}
 	}
@@ -521,21 +559,28 @@ func (r *Registry) finish(call *Call, reason, actorID string) {
 	}
 }
 
-// mailbox returns a user's queue, creating it on first use. Callers must hold the mutex.
+// mailbox returns a user's queue, creating it on first use.
+//
+// A new mailbox is deliberately left with a zero lastSeen. Queueing an event creates the recipient's
+// mailbox, and stamping the clock there would make someone who has never opened the Mini App look
+// like an active listener — which is exactly the case that has to be detected so the invitation can
+// be delivered through Telegram instead. Only Poll and Touch mark a user as present.
+//
+// Callers must hold the mutex.
 func (r *Registry) mailbox(userID string) *mailbox {
 	box, ok := r.boxes[userID]
 	if !ok {
-		box = &mailbox{lastSeen: r.now(), notify: make(chan struct{})}
+		box = &mailbox{createdAt: r.now(), notify: make(chan struct{})}
 		r.boxes[userID] = box
 	}
 	return box
 }
 
-// absent reports whether a participant has stopped polling. A user with no mailbox at all has
-// never polled, which for an accepted call means their client went away. Callers hold the mutex.
+// absent reports whether a participant is listening. A user with no mailbox, or one that has never
+// polled, has no client on the other end. Callers hold the mutex.
 func (r *Registry) absent(userID string, now time.Time) bool {
 	box, ok := r.boxes[userID]
-	if !ok {
+	if !ok || box.lastSeen.IsZero() {
 		return true
 	}
 	return now.Sub(box.lastSeen) > r.settings.PresenceTimeout

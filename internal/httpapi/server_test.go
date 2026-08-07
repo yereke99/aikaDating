@@ -10,6 +10,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,17 +26,49 @@ import (
 	"go.uber.org/zap"
 )
 
-type fakeTelegram struct{}
+// fakeTelegram stands in for the bot client. It also implements the optional call-ringing
+// interface, so the "notify a callee who is not in the app" path is exercised rather than skipped.
+type fakeTelegram struct {
+	mu    sync.Mutex
+	rings []string
+}
 
-func (fakeTelegram) SendLike(context.Context, domain.User, domain.User, string) error { return nil }
+func (*fakeTelegram) SendLike(context.Context, domain.User, domain.User, string) error { return nil }
+
+func (f *fakeTelegram) SendCallInvite(_ context.Context, recipient, _ domain.User, callID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rings = append(f.rings, recipient.ID+":"+callID)
+	return nil
+}
+
+// ringsFor waits briefly for the background notification, which is sent off the request path.
+func (f *fakeTelegram) ringsFor(userID string) []string {
+	for attempt := 0; attempt < 50; attempt++ {
+		f.mu.Lock()
+		matched := make([]string, 0, len(f.rings))
+		for _, ring := range f.rings {
+			if strings.HasPrefix(ring, userID+":") {
+				matched = append(matched, ring)
+			}
+		}
+		f.mu.Unlock()
+		if len(matched) > 0 {
+			return matched
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return nil
+}
 
 // environment is one wired-up server plus the pieces a test needs to arrange state directly.
 type environment struct {
-	router http.Handler
-	store  *database.Store
-	photos *profilephoto.Store
-	calls  *calls.Registry
-	cfg    config.Config
+	router   http.Handler
+	store    *database.Store
+	photos   *profilephoto.Store
+	calls    *calls.Registry
+	telegram *fakeTelegram
+	cfg      config.Config
 }
 
 func testEnvironment(t *testing.T, devUserID, adminID int64, adjust ...func(*config.Config)) environment {
@@ -67,8 +101,9 @@ func testEnvironment(t *testing.T, devUserID, adminID int64, adjust ...func(*con
 		SetupTimeout:    cfg.Calls.SetupTimeout,
 		PresenceTimeout: cfg.Calls.PresenceTimeout,
 	})
-	router := NewServer(cfg, store, users.NewService(store), auth.NewValidator(cfg), fakeTelegram{}, photos, registry, zap.NewNop()).Router()
-	return environment{router: router, store: store, photos: photos, calls: registry, cfg: cfg}
+	bot := &fakeTelegram{}
+	router := NewServer(cfg, store, users.NewService(store), auth.NewValidator(cfg), bot, photos, registry, zap.NewNop()).Router()
+	return environment{router: router, store: store, photos: photos, calls: registry, telegram: bot, cfg: cfg}
 }
 
 func testServer(t *testing.T, devUserID, adminID int64) http.Handler {

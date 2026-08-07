@@ -32,6 +32,13 @@ type likeSender interface {
 	SendLike(ctx context.Context, recipient, sender domain.User, message string) error
 }
 
+// callRinger delivers an invitation through the bot to someone who does not have the Mini App
+// open. It is a separate interface because it is optional: a deployment without it still works,
+// it simply cannot reach an absent callee.
+type callRinger interface {
+	SendCallInvite(ctx context.Context, recipient, caller domain.User, callID string) error
+}
+
 type Server struct {
 	cfg      config.Config
 	store    *database.Store
@@ -44,6 +51,8 @@ type Server struct {
 	// peer-to-peer and never reaches this process.
 	calls       *calls.Registry
 	callLimiter *users.LikeLimiter
+	// telegramCalls is nil when the bot client cannot ring an absent callee.
+	telegramCalls callRinger
 	// contentSecurityPolicy is assembled once, because connect-src has to name the configured ICE
 	// servers and those are only known after the configuration is loaded.
 	contentSecurityPolicy string
@@ -51,11 +60,24 @@ type Server struct {
 }
 
 func NewServer(cfg config.Config, store *database.Store, userService *users.Service, validator *auth.Validator, telegramClient likeSender, photos *profilephoto.Store, callRegistry *calls.Registry, logger *zap.Logger) *Server {
-	return &Server{
+	server := &Server{
 		cfg: cfg, store: store, users: userService, auth: validator,
 		telegram: telegramClient, limiter: users.NewLikeLimiter(cfg.LikeRatePerMinute), photos: photos,
 		calls: callRegistry, callLimiter: users.NewLikeLimiter(callInvitesPerMinute),
 		contentSecurityPolicy: contentSecurityPolicy(cfg), logger: logger,
+	}
+	// The real bot client can also ring an absent callee; a test double that only sends likes
+	// leaves that capability off rather than requiring every caller to supply one.
+	if ringer, ok := telegramClient.(callRinger); ok {
+		server.telegramCalls = ringer
+	}
+	return server
+}
+
+// endCallBetween hangs up a live call between two people, used when one of them blocks the other.
+func (s *Server) endCallBetween(first, second string) {
+	if s.calls != nil {
+		s.calls.EndBetween(first, second)
 	}
 }
 
@@ -72,6 +94,7 @@ func (s *Server) Router() http.Handler {
 			protected.Patch("/me", s.patchMe)
 			protected.Post("/me/location", s.updateLocation)
 			protected.Post("/me/photo", s.uploadProfilePhoto)
+			protected.Get("/me/blocks", s.listBlockedUsers)
 			protected.Get("/me/photos", s.listMyPhotos)
 			protected.Post("/me/photos", s.addPhoto)
 			protected.Patch("/me/photos/order", s.reorderPhotos)
@@ -83,6 +106,8 @@ func (s *Server) Router() http.Handler {
 			protected.Get("/users/{id}/cooldowns", s.userCooldowns)
 			protected.Post("/users/{id}/like", s.likeUser)
 			protected.Post("/users/{id}/message", s.messageUser)
+			protected.Post("/users/{id}/block", s.blockUser)
+			protected.Delete("/users/{id}/block", s.unblockUser)
 			// One-to-one video calls. These routes carry signalling only; the audio and video
 			// travel directly between the two browsers.
 			protected.Route("/calls", func(call chi.Router) {
@@ -359,6 +384,17 @@ func (s *Server) publicProfile(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
+	// A blocked profile is reported exactly like a missing one, in both directions, so neither
+	// person can tell a block apart from a deleted account.
+	hidden, err := s.blocked(r, currentUser(r).ID, id)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if hidden {
+		writeError(w, http.StatusNotFound, "user_not_found", localized(currentUser(r).AppLanguage, "recipient_unavailable"))
+		return
+	}
 	profile, err := s.users.PublicProfileWithPhotos(r.Context(), currentUser(r).ID, user)
 	if err != nil {
 		s.internalError(w, r, err)
@@ -563,6 +599,9 @@ func localized(language, code string) string {
 			"incoming_call_pending":   "Этот пользователь уже звонит вам.",
 			"call_invalid_state":      "Действие недоступно для этого звонка.",
 			"self_call":               "Нельзя позвонить самому себе.",
+			"self_block":              "Нельзя заблокировать самого себя.",
+			"user_blocked":            "Пользователь заблокирован.",
+			"user_unblocked":          "Пользователь разблокирован.",
 		},
 		"kk": {
 			"invalid_request": "Енгізілген деректерді тексеріңіз.", "invalid_location": "Геолокация дұрыс емес.",
@@ -590,6 +629,9 @@ func localized(language, code string) string {
 			"incoming_call_pending":   "Бұл қолданушы сізге қоңырау шалып жатыр.",
 			"call_invalid_state":      "Бұл қоңырау үшін әрекет қолжетімсіз.",
 			"self_call":               "Өзіңізге қоңырау шала алмайсыз.",
+			"self_block":              "Өзіңізді бұғаттай алмайсыз.",
+			"user_blocked":            "Қолданушы бұғатталды.",
+			"user_unblocked":          "Қолданушы бұғаттан шығарылды.",
 		},
 		"en": {
 			"invalid_request": "Check the submitted data.", "invalid_location": "Invalid location.",
@@ -617,6 +659,9 @@ func localized(language, code string) string {
 			"incoming_call_pending":   "This user is already calling you.",
 			"call_invalid_state":      "That action does not apply to this call.",
 			"self_call":               "You cannot call yourself.",
+			"self_block":              "You cannot block yourself.",
+			"user_blocked":            "User blocked.",
+			"user_unblocked":          "User unblocked.",
 		},
 	}
 	language = domain.NormalizeLanguage(language)

@@ -270,3 +270,35 @@ func TestSecurityHeadersAllowCallMedia(t *testing.T) {
 		t.Fatalf("the Telegram frame policy regressed: %s", policy)
 	}
 }
+
+// A Mini App cannot be woken up, so an invitation to someone who is not holding the signalling
+// channel open has to arrive through the bot instead — otherwise it would just time out unanswered.
+func TestAbsentCalleeIsRungThroughTelegram(t *testing.T) {
+	environment := testEnvironment(t, 123, 999)
+	target := actors(t, environment, 123)
+
+	invite := post(t, environment.router, "/api/calls", `{"user_id":"`+target.ID+`"}`)
+	if invite.Code != http.StatusCreated {
+		t.Fatalf("invite status = %d, body = %s", invite.Code, invite.Body.String())
+	}
+	call := decodeInto[callResponse](t, invite).Call
+	rings := environment.telegram.ringsFor(target.ID)
+	if len(rings) != 1 || rings[0] != target.ID+":"+call.ID {
+		t.Fatalf("rings = %+v, want one for call %s", rings, call.ID)
+	}
+}
+
+func TestPresentCalleeIsNotMessaged(t *testing.T) {
+	environment := testEnvironment(t, 123, 999)
+	target := actors(t, environment, 123)
+	// A client that has polled recently is holding the channel open and already receives the
+	// invitation over it.
+	environment.calls.Touch(target.ID)
+
+	if invite := post(t, environment.router, "/api/calls", `{"user_id":"`+target.ID+`"}`); invite.Code != http.StatusCreated {
+		t.Fatalf("invite status = %d, body = %s", invite.Code, invite.Body.String())
+	}
+	if rings := environment.telegram.ringsFor(target.ID); len(rings) != 0 {
+		t.Fatalf("a listening callee was messaged as well: %+v", rings)
+	}
+}

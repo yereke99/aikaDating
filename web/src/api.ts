@@ -1,6 +1,6 @@
 import type { CallConfig, CallEventsResponse, CallResponse, SignalPayload } from './calls/types'
 import { syncServerTime } from './lib/cooldown'
-import type { ActionResult, AdminStats, AdminUser, CooldownsResponse, Gallery, Me, NearbyPage, ProfileInput, PublicProfile } from './types'
+import type { ActionResult, AdminStats, AdminUser, BlockList, CooldownsResponse, Gallery, Me, NearbyPage, ProfileInput, PublicProfile } from './types'
 
 let authorization = ''
 
@@ -136,6 +136,12 @@ export const api = {
     request<CallResponse>(`/api/calls/${encodeURIComponent(callID)}/state`, { method: 'POST', body: JSON.stringify({ state }) }),
   signalCall: (callID: string, payload: SignalPayload) =>
     request<{ success: boolean }>(`/api/calls/${encodeURIComponent(callID)}/signal`, { method: 'POST', body: JSON.stringify(payload) }),
+
+  // --- personal blocks ------------------------------------------------------------------------
+  // Every mutation answers with the resulting list, so settings never needs a second request.
+  blocks: () => request<BlockList>('/api/me/blocks'),
+  blockUser: (id: string) => request<BlockList>(`/api/users/${encodeURIComponent(id)}/block`, { method: 'POST' }),
+  unblockUser: (id: string) => request<BlockList>(`/api/users/${encodeURIComponent(id)}/block`, { method: 'DELETE' }),
 
   adminStats: () => request<AdminStats>('/api/admin/stats'),
   adminUsers: (search: string) =>

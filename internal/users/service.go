@@ -249,6 +249,21 @@ func (s *Service) Nearby(ctx context.Context, current domain.User, radiusKM floa
 	if err != nil {
 		return NearbyPage{}, err
 	}
+	// Blocks are applied before ranking, so a hidden person never occupies a slot on a page and
+	// the result count stays honest. The lookup runs once per request, not once per candidate.
+	hidden, err := s.store.BlockedPairIDs(ctx, current.ID)
+	if err != nil {
+		return NearbyPage{}, err
+	}
+	if len(hidden) > 0 {
+		visible := candidates[:0]
+		for _, candidate := range candidates {
+			if _, blocked := hidden[candidate.ID]; !blocked {
+				visible = append(visible, candidate)
+			}
+		}
+		candidates = visible
+	}
 	now := s.now().UTC()
 	result := FilterNearby(current, candidates, radiusKM, gender, page, limit, now)
 	result.ServerTime = now.Format(time.RFC3339)

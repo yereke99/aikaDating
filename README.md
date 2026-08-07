@@ -1,6 +1,6 @@
 # AikaBot
 
-AikaBot is a small Telegram bot and Telegram Mini App for discovering nearby people, viewing short profiles, and sending a like or a short personal message. It runs as one Go process and stores application data in three SQLite tables: `users`, `user_photos`, and `user_action_cooldowns`.
+AikaBot is a small Telegram bot and Telegram Mini App for discovering nearby people, viewing short profiles, and sending a like or a short personal message. It runs as one Go process and stores application data in four SQLite tables: `users`, `user_photos`, `user_action_cooldowns`, and `user_blocks`.
 
 Like and message *content* is delivered immediately through the Telegram Bot API and is never written to SQLite. Only the per-target cooldown timestamps are stored.
 
@@ -15,6 +15,7 @@ Like and message *content* is delivered immediately through the Telegram Bot API
 - Up to four profile photos per user, stored per-owner on disk and mirrored into the profile avatar
 - Two-second nearby refresh with entity-tag revalidation, so an unchanged neighbourhood costs a 304
 - One-to-one WebRTC video calls: signalling through the same authenticated HTTP API, media directly peer-to-peer
+- Person-to-person blocking, enforced in both directions across discovery, likes, messages and calls
 
 SQLite `INTEGER` is a signed 64-bit value, so both `telegram_user_id` and `telegram_chat_id` retain Telegram's full numeric IDs. Internal profile IDs are random UUIDv4 strings.
 
@@ -72,6 +73,7 @@ The application applies every `migrations/*.up.sql` file in filename order at st
 
 - [`000001_create_users.up.sql`](migrations/000001_create_users.up.sql) — the `users` table and its indexes.
 - [`000002_photos_and_cooldowns.up.sql`](migrations/000002_photos_and_cooldowns.up.sql) — `user_photos` (gallery, one primary photo per user) and `user_action_cooldowns` (one row per actor/target/action). It also backfills one photo row for every user who already had an avatar, without moving or rewriting any file.
+- [`000003_user_blocks.up.sql`](migrations/000003_user_blocks.up.sql) — `user_blocks`, one row per block in the direction it was made. It adds no column to any existing table, so it cannot affect data that is already there.
 
 Each file is written to be safe to re-run — `IF NOT EXISTS` for schema, `NOT EXISTS` guards for data — so no migration-history table is needed. `000002_photos_and_cooldowns.down.sql` drops only the two new tables; `users.custom_photo_url` is left intact by the up migration, so a rollback restores the original single-avatar behaviour and loses no image.
 
@@ -207,6 +209,9 @@ All `/api` routes except `POST /api/auth/telegram` require a valid authorization
 | `GET` | `/api/users/{uuid}/cooldowns` | The caller's own like/message deadlines towards that user, plus server time |
 | `POST` | `/api/users/{uuid}/like` | Send a like; `{}` is the like action, `{"message":"..."}` performs the message action instead |
 | `POST` | `/api/users/{uuid}/message` | Send a personal message of up to 300 characters |
+| `GET` | `/api/me/blocks` | The people the caller has blocked |
+| `POST` | `/api/users/{uuid}/block` | Block someone; returns the updated list |
+| `DELETE` | `/api/users/{uuid}/block` | Unblock someone; returns the updated list |
 | `GET` | `/api/calls/config` | ICE servers, timeouts, and the caller's current call if one exists |
 | `GET` | `/api/calls/events?after=N` | Signalling channel; parked until an event is queued or `CALL_EVENT_WAIT` elapses |
 | `POST` | `/api/calls` | Invite `{"user_id":"…"}`; 409 when either side is busy |
@@ -325,10 +330,45 @@ TURN credentials are never part of the frontend bundle. With `TURN_STATIC_AUTH_S
 mints an expiring `<unix-expiry>:<id>` username and its HMAC per authenticated request (coturn's
 `use-auth-secret` REST flow); the secret itself never leaves the server.
 
+### Ringing someone who does not have the app open
+
+A Mini App cannot be woken up, so an invitation to a user who is not holding the signalling channel
+open would simply time out unanswered. When the registry reports the callee as absent, the bot sends
+them a message in **their own app language** with a single button.
+
+That button is a `https://t.me/<bot>?startapp=call_<callID>` deep link rather than a plain `web_app`
+button, because that is the form Telegram opens as the **Main Mini App** — which is what restores
+the app's own fullscreen presentation instead of a reduced-height sheet. Nothing about the existing
+fullscreen setup is re-implemented for this; the deep link just lands in the same boot path.
+
+On arrival the app asks `GET /api/calls/config`, which reports any call already ringing for that
+user, and goes straight to the incoming-call screen. The same mechanism restores a ringing call
+after an accidental reload. Presence is derived only from an actual poll, never from the fact that
+an event was queued, so a listening client is never messaged as well.
+
+An invitation lives for `CALL_INVITE_TIMEOUT`. If that is shorter than it takes someone to open
+Telegram, read the message and load the app, they will arrive after it expired — raise it if the
+notification path is the common one for your users.
+
+### Blocking
+
+`POST /api/users/{uuid}/block` hides two people from each other. One row is stored in the direction
+it was made, and every rule reads it in both directions, so the blocked person also stops seeing the
+person who blocked them without a mirrored row.
+
+A block removes the person from discovery, and makes their profile, their photos, likes, messages
+and calls all report the same "unavailable" result as a deleted account — neither side can tell a
+block apart from an account that no longer exists, and neither learns who blocked whom. A call that
+is already in progress is hung up immediately. Blocking twice, or unblocking someone who was never
+blocked, both succeed without changing anything, so a retried request is harmless.
+
+Unblocking is only possible from **Settings → Blocked people**, which is drawn only when the list is
+not empty.
+
 ### Telegram and platform limits
 
-- A Mini App can only ring a user who currently has it open. There is no push wake-up, and this
-  build sends no bot notification for a missed call.
+- A call still requires the callee to open Telegram: the notification above is the wake-up, but a
+  user who ignores it will not be reached.
 - Telegram must have OS-level camera and microphone permission itself; the in-page prompt cannot
   grant what the container was denied.
 - A suspended WebView stops running JavaScript, so backgrounding the app for longer than

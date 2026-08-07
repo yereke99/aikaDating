@@ -295,6 +295,15 @@ func (s *Server) userPhotos(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
+	hidden, err := s.blocked(r, viewer.ID, id)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if hidden {
+		writeError(w, http.StatusNotFound, "user_not_found", localized(viewer.AppLanguage, "recipient_unavailable"))
+		return
+	}
 	photos, err := s.store.ListPhotos(r.Context(), id)
 	if err != nil {
 		s.internalError(w, r, err)

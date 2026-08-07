@@ -4,6 +4,7 @@ import { useBackButton } from '../hooks'
 import { MessageKey, translator } from '../i18n'
 import type { Language } from '../types'
 import { Avatar } from './Avatar'
+import { CallEndIcon, FlipCameraIcon, MicIcon, MicOffIcon, VideoCallIcon, VideoOffIcon } from './icons'
 
 /**
  * The video call screen.
@@ -57,18 +58,18 @@ function CallPrompt({ call, language }: { call: CallCenter; language: Language }
         {call.phase === 'incoming' && (
           <>
             <button type="button" className="call-action decline" disabled={call.busy} onClick={call.decline} aria-label={t('declineCall')}>
-              <i aria-hidden="true">✕</i>
+              <i aria-hidden="true"><CallEndIcon /></i>
               <span>{t('declineCall')}</span>
             </button>
             <button type="button" className="call-action accept" disabled={call.busy} onClick={call.accept} aria-label={t('acceptCall')}>
-              <i aria-hidden="true">◉</i>
+              <i aria-hidden="true"><VideoCallIcon /></i>
               <span>{t('acceptCall')}</span>
             </button>
           </>
         )}
         {call.phase === 'outgoing' && (
           <button type="button" className="call-action decline" disabled={call.busy} onClick={call.hangUp} aria-label={t('cancelCall')}>
-            <i aria-hidden="true">✕</i>
+            <i aria-hidden="true"><CallEndIcon /></i>
             <span>{t('cancelCall')}</span>
           </button>
         )}
@@ -152,7 +153,7 @@ function ActiveCall({ call, language }: { call: CallCenter; language: Language }
           aria-label={call.muted ? t('unmuteMicrophone') : t('muteMicrophone')}
           onClick={call.toggleMicrophone}
         >
-          <i aria-hidden="true">{call.muted ? '⊘' : '♪'}</i>
+          <i aria-hidden="true">{call.muted ? <MicOffIcon /> : <MicIcon />}</i>
         </button>
         <button
           type="button"
@@ -161,7 +162,7 @@ function ActiveCall({ call, language }: { call: CallCenter; language: Language }
           aria-label={call.cameraOff ? t('turnCameraOn') : t('turnCameraOff')}
           onClick={call.toggleCamera}
         >
-          <i aria-hidden="true">◉</i>
+          <i aria-hidden="true">{call.cameraOff ? <VideoOffIcon /> : <VideoCallIcon />}</i>
         </button>
         <button
           type="button"
@@ -170,10 +171,10 @@ function ActiveCall({ call, language }: { call: CallCenter; language: Language }
           aria-label={t('switchCamera')}
           onClick={call.flipCamera}
         >
-          <i aria-hidden="true">⇄</i>
+          <i aria-hidden="true"><FlipCameraIcon /></i>
         </button>
         <button type="button" className="call-control end" aria-label={t('endCall')} onClick={call.hangUp}>
-          <i aria-hidden="true">✕</i>
+          <i aria-hidden="true"><CallEndIcon /></i>
         </button>
       </div>
     </>

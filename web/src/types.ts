@@ -91,6 +91,19 @@ export interface ActionResult {
   server_time?: string
 }
 
+/** One person the current user has blocked, as shown in settings. */
+export interface BlockedUser {
+  id: string
+  display_name: string
+  username?: string
+  photo_url?: string
+  blocked_at: string
+}
+
+export interface BlockList {
+  blocked: BlockedUser[]
+}
+
 export interface AdminStats {
   total: number
   completed: number

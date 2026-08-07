@@ -354,6 +354,11 @@ export function useCallCenter(userID: string | undefined, notify: (text: string)
 
   // Read the feature's availability once. A client that cannot do WebRTC at all never shows a
   // call button, rather than offering one that fails at the last step.
+  //
+  // The same response reports whether a call is already ringing for this user, which is what makes
+  // the Telegram "Answer" button work: it opens the Mini App cold, and the app lands directly on
+  // the incoming-call screen instead of the tab it happened to start on. It also restores a call
+  // after an accidental reload.
   useEffect(() => {
     if (!userID) return
     let cancelled = false
@@ -363,7 +368,16 @@ export function useCallCenter(userID: string | undefined, notify: (text: string)
         if (cancelled) return
         ice.current = config.ice_servers ?? []
         inviteTimeoutMs.current = Math.max(15, config.invite_timeout_seconds) * 1000
-        setEnabled(config.enabled && supportsCalls())
+        const ready = config.enabled && supportsCalls()
+        setEnabled(ready)
+        if (!ready || !config.current || phase.current !== 'idle') return
+        const call = config.current
+        // Only a still-ringing invitation can be resumed. A call that was already accepted has a
+        // peer connection that did not survive the reload, so it is left for the server to reap.
+        if (call.status !== 'ringing' || call.callee.id !== userID) return
+        active.current = { id: call.id, outgoing: false }
+        haptic('warning')
+        setView({ ...IDLE, phase: 'incoming', callID: call.id, peer: call.caller, outgoing: false })
       })
       .catch(() => undefined)
     return () => {

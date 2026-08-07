@@ -421,3 +421,44 @@ func TestMailboxKeepsOnlyItsMostRecentEvents(t *testing.T) {
 		t.Fatalf("buffered %d events, cursor %d", len(events), cursor)
 	}
 }
+
+// Queueing an invitation creates the callee's mailbox. That must not make someone who has never
+// opened the Mini App look like an active listener, because "nobody is listening" is exactly the
+// signal used to deliver the invitation through Telegram instead.
+func TestQueueingAnEventDoesNotMakeSomeonePresent(t *testing.T) {
+	registry, clock := testRegistry(t)
+	if registry.Present("bob") {
+		t.Fatal("a user who has never polled must not be present")
+	}
+	if _, err := registry.Invite(alice, bob); err != nil {
+		t.Fatal(err)
+	}
+	if registry.Present("bob") {
+		t.Fatal("queueing an invitation must not mark the callee as present")
+	}
+
+	drain(t, registry, "bob", 0)
+	if !registry.Present("bob") {
+		t.Fatal("a client that just polled must be present")
+	}
+	*clock = clock.Add(2 * time.Minute)
+	if registry.Present("bob") {
+		t.Fatal("presence must expire once polling stops")
+	}
+}
+
+// The undelivered invitation has to survive until the person can arrive through the notification.
+func TestAQueuedInvitationSurvivesCleanup(t *testing.T) {
+	registry, clock := testRegistry(t)
+	if _, err := registry.Invite(alice, bob); err != nil {
+		t.Fatal(err)
+	}
+	for step := 0; step < 5; step++ {
+		*clock = clock.Add(5 * time.Second)
+		registry.Sweep()
+	}
+	events, _ := drain(t, registry, "bob", 0)
+	if len(events) != 1 || events[0].Type != EventIncoming {
+		t.Fatalf("bob events = %+v, want the invitation still queued", events)
+	}
+}

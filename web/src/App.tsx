@@ -4,6 +4,7 @@ import { useCallCenter } from './calls/useCallCenter'
 import { Avatar } from './components/Avatar'
 import { CallScreen } from './components/CallScreen'
 import { DateField } from './components/DateField'
+import { BlockIcon, VideoCallIcon } from './components/icons'
 import { MessageSheet } from './components/MessageSheet'
 import { PhotoCarousel, PhotoViewer } from './components/PhotoCarousel'
 import { PhotoManager } from './components/PhotoManager'
@@ -14,7 +15,7 @@ import { Cooldowns, deadlineFromError, formatRemaining } from './lib/cooldown'
 import { ageFromBirthDate } from './lib/date'
 import { useNearbyFeed } from './nearby'
 import { haptic, initializeTelegram, LocationFailure, openLocationSettings, requestLocation, startParameter } from './telegram'
-import type { AdminStats, AdminUser, Gallery, Gender, Language, Me, ProfileInput, PublicProfile } from './types'
+import type { AdminStats, AdminUser, BlockedUser, Gallery, Gender, Language, Me, ProfileInput, PublicProfile } from './types'
 
 const telegramApp = initializeTelegram()
 
@@ -492,6 +493,7 @@ function PublicProfileSheet({
   onLike,
   onCall,
   callBusy,
+  onBlock,
 }: {
   profile: PublicProfile
   language: Language
@@ -502,6 +504,7 @@ function PublicProfileSheet({
   /** Absent when the client or the deployment cannot do video calls, which hides the button. */
   onCall?: () => void
   callBusy?: boolean
+  onBlock: () => void
 }) {
   const t = translator(language)
   const [viewer, setViewer] = useState(false)
@@ -516,6 +519,27 @@ function PublicProfileSheet({
           <span className="visually-hidden" id="public-profile-title">
             {profile.display_name}
           </span>
+          {/* Pinned at the top of the sheet rather than in the footer: the header is always on
+              screen, whatever the client reports as its viewport height. */}
+          <div className="sheet-tools">
+            <button type="button" className="sheet-tool" aria-label={t('blockUser')} title={t('blockUser')} onClick={onBlock}>
+              <BlockIcon />
+            </button>
+            {onCall && (
+              // Disabled only while the invitation request is in flight, so a double tap cannot
+              // open two calls.
+              <button
+                type="button"
+                className="sheet-tool call"
+                disabled={callBusy}
+                aria-label={t('videoCall')}
+                title={t('videoCall')}
+                onClick={onCall}
+              >
+                <VideoCallIcon />
+              </button>
+            )}
+          </div>
         </SheetHead>
         <SheetBody>
           <PhotoCarousel
@@ -554,14 +578,7 @@ function PublicProfileSheet({
           )}
         </SheetBody>
         <SheetFoot>
-          <div className={`sheet-actions${onCall ? ' with-call' : ''}`}>
-            {onCall && (
-              // Disabled only while the invitation request is in flight, so a double tap cannot
-              // open two calls.
-              <button type="button" className="call-invite" disabled={callBusy} onClick={onCall} aria-label={t('videoCall')} title={t('videoCall')}>
-                <span aria-hidden="true">▷</span>
-              </button>
-            )}
+          <div className="sheet-actions">
             <button className="secondary-button" disabled={likeLeft > 0} onClick={onLike}>
               ♥ {likeLeft > 0 ? formatRemaining(likeLeft) : t('like')}
             </button>
@@ -573,6 +590,47 @@ function PublicProfileSheet({
       </Sheet>
       {viewer && <PhotoViewer photos={photos} language={language} alt={profile.display_name} onClose={() => setViewer(false)} />}
     </>
+  )
+}
+
+/** A small confirmation built on the existing sheet primitive, for actions that cannot be undone here. */
+function ConfirmSheet({
+  language,
+  title,
+  body,
+  confirmLabel,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  language: Language
+  title: string
+  body: string
+  confirmLabel: string
+  busy?: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const t = translator(language)
+  return (
+    <Sheet onClose={onCancel} className="confirm-sheet" labelledBy="confirm-title">
+      <SheetHead>
+        <h2 id="confirm-title">{title}</h2>
+      </SheetHead>
+      <SheetBody>
+        <p className="confirm-body">{body}</p>
+      </SheetBody>
+      <SheetFoot>
+        <div className="sheet-actions">
+          <button type="button" className="secondary-button" onClick={onCancel}>
+            {t('cancel')}
+          </button>
+          <button type="button" className="primary-button danger-button" disabled={busy} onClick={onConfirm}>
+            {busy ? t('saving') : confirmLabel}
+          </button>
+        </div>
+      </SheetFoot>
+    </Sheet>
   )
 }
 
@@ -603,8 +661,32 @@ function Nearby({
   // Guards a card whose like request is already in flight from a second tap.
   const likesInFlight = useRef(new Set<string>())
 
+  const [blockTarget, setBlockTarget] = useState<PublicProfile | null>(null)
+  const [blocking, setBlocking] = useState(false)
+
   const feed = useNearbyFeed({ enabled: me.location_available, radius, gender })
   const { profiles, cooldowns, noteCooldown } = feed
+
+  // Blocking is confirmed first: it is not undoable from this screen, only from settings.
+  async function confirmBlock(profile: PublicProfile) {
+    if (blocking) return
+    setBlocking(true)
+    try {
+      await api.blockUser(profile.id)
+      haptic('success')
+      notify(t('userBlocked'))
+      setBlockTarget(null)
+      setOpenProfile(null)
+      clearInitialProfile()
+      // The next refresh drops the card server-side; reloading now removes it immediately.
+      feed.reload()
+    } catch (caught) {
+      haptic('error')
+      notify(caught instanceof Error ? caught.message : t('serverError'))
+    } finally {
+      setBlocking(false)
+    }
+  }
 
   useEffect(() => {
     if (initialProfile) setOpenProfile(initialProfile)
@@ -779,10 +861,22 @@ function Nearby({
           onLike={() => void sendLike(openProfile)}
           onCall={onCall && (() => onCall(openProfile))}
           callBusy={callBusy}
+          onBlock={() => setBlockTarget(openProfile)}
           onMessage={() => {
             setMessageTarget(openProfile)
             setOpenProfile(null)
           }}
+        />
+      )}
+      {blockTarget && (
+        <ConfirmSheet
+          language={me.app_language}
+          title={t('blockUser')}
+          body={`${t('blockConfirm')} ${blockTarget.display_name}?`}
+          confirmLabel={t('blockUser')}
+          busy={blocking}
+          onCancel={() => setBlockTarget(null)}
+          onConfirm={() => void confirmBlock(blockTarget)}
         />
       )}
       {messageTarget && (
@@ -869,7 +963,69 @@ function Settings({ me, onSaved, notify }: { me: Me; onSaved: (me: Me) => void; 
       <button disabled={saving} className="primary-button block-button" onClick={save}>
         {saving ? t('saving') : t('save')}
       </button>
+      <BlockedUsers language={me.app_language} notify={notify} />
     </main>
+  )
+}
+
+/** The block list, and the only place a block can be undone. Loaded lazily with the settings tab. */
+function BlockedUsers({ language, notify }: { language: Language; notify: (text: string) => void }) {
+  const t = translator(language)
+  const [blocked, setBlocked] = useState<BlockedUser[] | null>(null)
+  const [pending, setPending] = useState('')
+
+  useEffect(() => {
+    let active = true
+    api
+      .blocks()
+      .then((result) => active && setBlocked(result.blocked))
+      .catch(() => active && setBlocked([]))
+    return () => {
+      active = false
+    }
+  }, [])
+
+  async function unblock(user: BlockedUser) {
+    if (pending) return
+    setPending(user.id)
+    try {
+      const result = await api.unblockUser(user.id)
+      setBlocked(result.blocked)
+      haptic('success')
+      notify(t('userUnblocked'))
+    } catch (caught) {
+      haptic('error')
+      notify(caught instanceof Error ? caught.message : t('serverError'))
+    } finally {
+      setPending('')
+    }
+  }
+
+  // Nothing is drawn until the list is known and non-empty, so a user who never blocked anyone
+  // sees the settings screen exactly as it was.
+  if (!blocked || blocked.length === 0) return null
+
+  return (
+    <section className="card blocked-card">
+      <div className="blocked-head">
+        <strong>{t('blockedUsers')}</strong>
+        <p>{t('blockedHelp')}</p>
+      </div>
+      <ul className="blocked-list">
+        {blocked.map((user) => (
+          <li key={user.id}>
+            <Avatar src={user.photo_url} name={user.display_name} size="small" />
+            <div>
+              <strong>{user.display_name}</strong>
+              {user.username && <span className="username">@{user.username}</span>}
+            </div>
+            <button type="button" className="secondary-button" disabled={pending === user.id} onClick={() => void unblock(user)}>
+              {pending === user.id ? '…' : t('unblockUser')}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }
 

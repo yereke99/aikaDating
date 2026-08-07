@@ -59,6 +59,9 @@ const messages = {
     call_permission_denied: 'Нет доступа к камере или микрофону. Разрешите его в настройках Telegram и повторите.',
     call_no_device: 'Камера или микрофон не найдены.', call_device_busy: 'Камера занята другим приложением.',
     call_unsupported: 'Видеозвонки не поддерживаются в этой версии Telegram.', call_media_failed: 'Не удалось включить камеру.',
+    blockUser: 'Заблокировать', unblockUser: 'Разблокировать', blockConfirm: 'Заблокировать пользователя',
+    userBlocked: 'Пользователь заблокирован', userUnblocked: 'Пользователь разблокирован',
+    blockedUsers: 'Заблокированные', blockedHelp: 'Вы не видите друг друга и не можете писать или звонить.',
   },
   kk: {
     nearby: 'Жақын жердегі адамдар', profile: 'Менің профилім', settings: 'Баптаулар', admin: 'Әкімші',
@@ -114,6 +117,9 @@ const messages = {
     call_permission_denied: 'Камера мен микрофонға рұқсат жоқ. Telegram баптауларынан рұқсат беріп, қайталаңыз.',
     call_no_device: 'Камера немесе микрофон табылмады.', call_device_busy: 'Камераны басқа қолданба пайдаланып жатыр.',
     call_unsupported: 'Telegram-ның бұл нұсқасында бейнеқоңырау қолданылмайды.', call_media_failed: 'Камераны қосу мүмкін болмады.',
+    blockUser: 'Бұғаттау', unblockUser: 'Бұғаттан шығару', blockConfirm: 'Қолданушыны бұғаттау',
+    userBlocked: 'Қолданушы бұғатталды', userUnblocked: 'Қолданушы бұғаттан шығарылды',
+    blockedUsers: 'Бұғатталғандар', blockedHelp: 'Сіздер бір-біріңізді көрмейсіздер, жаза да, қоңырау шала да алмайсыздар.',
   },
   en: {
     nearby: 'People nearby', profile: 'My profile', settings: 'Settings', admin: 'Admin',
@@ -169,6 +175,9 @@ const messages = {
     call_permission_denied: 'Camera or microphone access was denied. Allow it in your Telegram settings and try again.',
     call_no_device: 'No camera or microphone was found.', call_device_busy: 'The camera is in use by another app.',
     call_unsupported: 'Video calls are not supported in this Telegram version.', call_media_failed: 'The camera could not be started.',
+    blockUser: 'Block', unblockUser: 'Unblock', blockConfirm: 'Block this person',
+    userBlocked: 'User blocked', userUnblocked: 'User unblocked',
+    blockedUsers: 'Blocked people', blockedHelp: 'You cannot see each other, and neither of you can message or call.',
   },
 } as const
 

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"aika/internal/calls"
 	"aika/internal/database"
 	"aika/internal/domain"
+
+	"go.uber.org/zap"
 )
 
 // callInvitesPerMinute bounds how often one account may start a call. The "one active call per
@@ -148,6 +151,17 @@ func (s *Server) createCall(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
+	hidden, err := s.blocked(r, caller.ID, callee.ID)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if hidden {
+		// Reported as an unavailable recipient, not as a block, so neither side learns which of
+		// them blocked the other.
+		writeError(w, http.StatusNotFound, "user_not_found", localized(caller.AppLanguage, "recipient_unavailable"))
+		return
+	}
 
 	s.calls.Touch(caller.ID)
 	call, err := s.calls.Invite(peerOf(caller), peerOf(callee))
@@ -164,7 +178,31 @@ func (s *Server) createCall(w http.ResponseWriter, r *http.Request) {
 		s.writeCallError(w, r, caller, err)
 		return
 	}
+	s.ringThroughTelegram(r, caller, callee, call)
 	s.writeCall(w, http.StatusCreated, caller.ID, call)
+}
+
+// ringThroughTelegram delivers the invitation to a callee who does not have the Mini App open.
+//
+// A Mini App cannot be woken up: without this, calling someone who is not already looking at the
+// app would simply time out unanswered. A client that is holding the signalling channel already
+// has the invitation, so it is never messaged twice.
+//
+// It runs in the background: the caller's request should not wait on the Bot API, and a delivery
+// failure does not invalidate a call that is legitimately ringing.
+func (s *Server) ringThroughTelegram(r *http.Request, caller, callee domain.User, call *calls.Call) {
+	if s.telegramCalls == nil || call == nil || call.Status != calls.StatusRinging || s.calls.Present(callee.ID) {
+		return
+	}
+	// A fresh context: the caller's request finishes as soon as the invitation is created, and
+	// cancelling it must not cancel the notification.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Second)
+		defer cancel()
+		if err := s.telegramCalls.SendCallInvite(ctx, callee, caller, call.ID); err != nil {
+			s.logger.Info("could not ring the callee through Telegram", zap.String("call_id", call.ID), zap.Error(err))
+		}
+	}()
 }
 
 func (s *Server) acceptCall(w http.ResponseWriter, r *http.Request) {

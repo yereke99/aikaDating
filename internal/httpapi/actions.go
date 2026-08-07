@@ -103,6 +103,17 @@ func (s *Server) performAction(w http.ResponseWriter, r *http.Request, requireMe
 		s.internalError(w, r, err)
 		return
 	}
+	// Either direction of a personal block stops the action, and it reads as an unavailable
+	// recipient so neither side learns who blocked whom.
+	hidden, err := s.blocked(r, sender.ID, id)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if hidden {
+		writeError(w, http.StatusNotFound, "recipient_unavailable", localized(sender.AppLanguage, "recipient_unavailable"))
+		return
+	}
 
 	action := database.ActionLike
 	if request.Message != nil {

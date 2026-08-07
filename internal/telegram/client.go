@@ -110,6 +110,54 @@ func (c *Client) SendLike(ctx context.Context, recipient, sender domain.User, me
 	return err
 }
 
+// SendCallInvite tells someone that a call is ringing for them right now.
+//
+// It is sent only when the recipient does not have the Mini App open, because a client that is
+// already listening receives the invitation over the signalling channel instead. The button is a
+// `startapp` deep link rather than a plain web_app button: that is the form Telegram opens as the
+// Main Mini App, which is what restores the app's own fullscreen presentation. The call ID travels
+// in the start parameter so the app can go straight to the ringing screen.
+func (c *Client) SendCallInvite(ctx context.Context, recipient, caller domain.User, callID string) error {
+	if !recipient.TelegramChatID.Valid {
+		return ErrRecipientUnavailable
+	}
+	markup := inlineKeyboardMarkup{InlineKeyboard: [][]inlineKeyboardButton{{{
+		Text: answerButtonText(recipient.AppLanguage),
+		// `call_` plus a UUID is 41 characters of [A-Za-z0-9_-], inside Telegram's start-parameter
+		// limits, so the ID survives the round trip unchanged.
+		URL: fmt.Sprintf("https://t.me/%s?startapp=call_%s", c.botUsername, callID),
+	}}}}
+	err := c.sendText(ctx, recipient.TelegramChatID.Int64, FormatCallNotification(recipient.AppLanguage, caller), markup)
+	if isRecipientError(err) {
+		return ErrRecipientUnavailable
+	}
+	return err
+}
+
+// FormatCallNotification is the ringing message, in the recipient's own app language.
+func FormatCallNotification(language string, caller domain.User) string {
+	name := html.EscapeString(caller.Name())
+	switch domain.NormalizeLanguage(language) {
+	case domain.LanguageKazakh:
+		return "📹 <b>" + name + "</b> сізге бейнеқоңырау шалып жатыр.\n\nЖауап беру үшін төмендегі батырманы басыңыз."
+	case domain.LanguageEnglish:
+		return "📹 <b>" + name + "</b> is calling you.\n\nTap the button below to answer."
+	default:
+		return "📹 <b>" + name + "</b> звонит вам.\n\nНажмите кнопку ниже, чтобы ответить."
+	}
+}
+
+func answerButtonText(language string) string {
+	switch domain.NormalizeLanguage(language) {
+	case domain.LanguageKazakh:
+		return "📹 Жауап беру"
+	case domain.LanguageEnglish:
+		return "📹 Answer"
+	default:
+		return "📹 Ответить"
+	}
+}
+
 func (c *Client) sendText(ctx context.Context, chatID int64, text string, markup inlineKeyboardMarkup) error {
 	return c.call(ctx, "sendMessage", map[string]any{
 		"chat_id":      chatID,

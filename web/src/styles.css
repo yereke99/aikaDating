@@ -1165,7 +1165,12 @@ select {
   left: 0;
   display: flex;
   width: 100%;
-  height: var(--app-live-height);
+  /* min() caps the reported height at what the window can actually show. In Telegram's fullscreen
+     mode some clients report a viewport taller than the visible area, and because the sheet is
+     bottom-aligned the whole footer — Like and Message — then lands below the screen edge with no
+     way to scroll to it. Clamping here fixes that without changing how the keyboard shrinks the
+     sheet, which is what --app-live-height is for. */
+  height: min(var(--app-live-height), 100dvh);
   align-items: flex-end;
   justify-content: center;
   padding-top: calc(var(--app-inset-top) + 12px);
@@ -1246,25 +1251,96 @@ select {
 .sheet-actions .primary-button {
   font-variant-numeric: tabular-nums;
 }
-/* The call button is a fixed-width icon so the like and message actions keep the proportions they
-   already had. */
-.sheet-actions.with-call {
-  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.3fr);
+/* Actions that live in the sheet's pinned header, where they are on screen no matter how tall the
+   client says the viewport is. */
+.sheet-tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-2);
 }
-.call-invite {
+.sheet-tool {
   display: grid;
-  width: var(--control-h);
-  min-height: var(--control-h);
-  border: 1px solid var(--gold-soft);
-  border-radius: var(--r-field);
-  background: var(--gold-soft);
-  color: var(--gold);
-  font-size: 18px;
+  width: var(--touch);
+  height: var(--touch);
+  border: 1px solid var(--line-soft);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 20px;
   place-items: center;
 }
-.call-invite:disabled {
+.sheet-tool.call {
+  border-color: var(--gold-soft);
+  background: var(--gold-soft);
+  color: var(--gold);
+}
+.sheet-tool:disabled {
   cursor: default;
   opacity: 0.45;
+}
+
+/* Icons scale with the button's font-size and never stretch a flex row. */
+.icon {
+  display: block;
+  flex: none;
+}
+
+.confirm-sheet .sheet-body {
+  padding-block: var(--s-4);
+}
+.confirm-body {
+  color: var(--muted);
+  font-size: var(--fs-label);
+}
+.danger-button {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #1a0508;
+}
+
+/* --- blocked people ------------------------------------------------------- */
+
+.blocked-card {
+  display: grid;
+  gap: var(--s-3);
+}
+.blocked-head {
+  display: grid;
+  gap: 2px;
+}
+.blocked-head p {
+  color: var(--muted);
+  font-size: var(--fs-caption);
+}
+.blocked-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: var(--s-2);
+  list-style: none;
+}
+.blocked-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+.blocked-list li > div {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+}
+.blocked-list strong {
+  overflow: hidden;
+  font-size: var(--fs-label);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.blocked-list .secondary-button {
+  min-height: var(--control-h-sm);
+  flex: none;
+  padding: 0 var(--s-3);
+  font-size: var(--fs-caption);
 }
 
 /* --- message composer ----------------------------------------------------- */
@@ -1450,7 +1526,7 @@ select {
   left: 0;
   display: grid;
   width: 100%;
-  height: var(--app-live-height);
+  height: min(var(--app-live-height), 100dvh);
   align-items: center;
   padding: calc(var(--app-inset-top) + 8px) 0 calc(var(--app-inset-bottom) + 8px);
   background: #000;
@@ -1497,7 +1573,7 @@ select {
   top: 0;
   left: 0;
   width: 100%;
-  height: var(--app-live-height);
+  height: min(var(--app-live-height), 100dvh);
   overflow: hidden;
   background: #05070c;
   color: #fff;
