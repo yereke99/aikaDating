@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"aika/internal/auth"
+	"aika/internal/calls"
 	"aika/internal/config"
 	"aika/internal/database"
 	"aika/internal/domain"
@@ -39,13 +40,22 @@ type Server struct {
 	telegram likeSender
 	limiter  *users.LikeLimiter
 	photos   *profilephoto.Store
-	logger   *zap.Logger
+	// calls holds the in-memory signalling state for one-to-one video calls. Call media is
+	// peer-to-peer and never reaches this process.
+	calls       *calls.Registry
+	callLimiter *users.LikeLimiter
+	// contentSecurityPolicy is assembled once, because connect-src has to name the configured ICE
+	// servers and those are only known after the configuration is loaded.
+	contentSecurityPolicy string
+	logger                *zap.Logger
 }
 
-func NewServer(cfg config.Config, store *database.Store, userService *users.Service, validator *auth.Validator, telegramClient likeSender, photos *profilephoto.Store, logger *zap.Logger) *Server {
+func NewServer(cfg config.Config, store *database.Store, userService *users.Service, validator *auth.Validator, telegramClient likeSender, photos *profilephoto.Store, callRegistry *calls.Registry, logger *zap.Logger) *Server {
 	return &Server{
 		cfg: cfg, store: store, users: userService, auth: validator,
-		telegram: telegramClient, limiter: users.NewLikeLimiter(cfg.LikeRatePerMinute), photos: photos, logger: logger,
+		telegram: telegramClient, limiter: users.NewLikeLimiter(cfg.LikeRatePerMinute), photos: photos,
+		calls: callRegistry, callLimiter: users.NewLikeLimiter(callInvitesPerMinute),
+		contentSecurityPolicy: contentSecurityPolicy(cfg), logger: logger,
 	}
 }
 
@@ -73,6 +83,18 @@ func (s *Server) Router() http.Handler {
 			protected.Get("/users/{id}/cooldowns", s.userCooldowns)
 			protected.Post("/users/{id}/like", s.likeUser)
 			protected.Post("/users/{id}/message", s.messageUser)
+			// One-to-one video calls. These routes carry signalling only; the audio and video
+			// travel directly between the two browsers.
+			protected.Route("/calls", func(call chi.Router) {
+				call.Get("/config", s.callConfig)
+				call.Get("/events", s.callEvents)
+				call.Post("/", s.createCall)
+				call.Post("/{callID}/accept", s.acceptCall)
+				call.Post("/{callID}/reject", s.rejectCall)
+				call.Post("/{callID}/end", s.endCall)
+				call.Post("/{callID}/state", s.updateCallState)
+				call.Post("/{callID}/signal", s.signalCall)
+			})
 			protected.Route("/admin", func(admin chi.Router) {
 				admin.Use(s.requireAdmin)
 				admin.Get("/stats", s.adminStats)
@@ -534,6 +556,13 @@ func localized(language, code string) string {
 			"photo_limit_reached":     "Достигнут максимум фотографий.",
 			"photo_not_found":         "Фото не найдено.",
 			"photo_order_mismatch":    "Список фотографий устарел. Обновите страницу.",
+			"calls_disabled":          "Видеозвонки сейчас недоступны.",
+			"call_not_found":          "Звонок не найден или уже завершён.",
+			"call_busy":               "Вы уже участвуете в звонке.",
+			"peer_busy":               "Пользователь сейчас разговаривает.",
+			"incoming_call_pending":   "Этот пользователь уже звонит вам.",
+			"call_invalid_state":      "Действие недоступно для этого звонка.",
+			"self_call":               "Нельзя позвонить самому себе.",
 		},
 		"kk": {
 			"invalid_request": "Енгізілген деректерді тексеріңіз.", "invalid_location": "Геолокация дұрыс емес.",
@@ -554,6 +583,13 @@ func localized(language, code string) string {
 			"photo_limit_reached":     "Фото саны шегіне жетті.",
 			"photo_not_found":         "Фото табылмады.",
 			"photo_order_mismatch":    "Фото тізімі ескірді. Бетті жаңартыңыз.",
+			"calls_disabled":          "Бейнеқоңыраулар қазір қолжетімсіз.",
+			"call_not_found":          "Қоңырау табылмады немесе аяқталған.",
+			"call_busy":               "Сіз қазір қоңырауда отырсыз.",
+			"peer_busy":               "Қолданушы қазір сөйлесіп жатыр.",
+			"incoming_call_pending":   "Бұл қолданушы сізге қоңырау шалып жатыр.",
+			"call_invalid_state":      "Бұл қоңырау үшін әрекет қолжетімсіз.",
+			"self_call":               "Өзіңізге қоңырау шала алмайсыз.",
 		},
 		"en": {
 			"invalid_request": "Check the submitted data.", "invalid_location": "Invalid location.",
@@ -574,6 +610,13 @@ func localized(language, code string) string {
 			"photo_limit_reached":     "Photo limit reached.",
 			"photo_not_found":         "Photo not found.",
 			"photo_order_mismatch":    "The photo list is out of date. Reload and try again.",
+			"calls_disabled":          "Video calls are unavailable right now.",
+			"call_not_found":          "That call no longer exists.",
+			"call_busy":               "You are already in a call.",
+			"peer_busy":               "This user is already in a call.",
+			"incoming_call_pending":   "This user is already calling you.",
+			"call_invalid_state":      "That action does not apply to this call.",
+			"self_call":               "You cannot call yourself.",
 		},
 	}
 	language = domain.NormalizeLanguage(language)
@@ -592,6 +635,10 @@ func (w *responseRecorder) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
+
+// Unwrap lets http.ResponseController reach the real writer through this wrapper. The signalling
+// poll needs it to extend its write deadline past the server's default WriteTimeout.
+func (w *responseRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (s *Server) requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -619,13 +666,59 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Permissions-Policy", "camera=(self), microphone=(), geolocation=(self)")
-		// blob: is required by the profile photo picker: the Mini App decodes the chosen file and
-		// re-encodes it to JPEG in a canvas before upload, and that decode step loads a blob: URL.
-		// Without it the browser blocks the image load and the upload never starts.
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org")
+		// The microphone was previously denied outright. A video call needs both capture devices,
+		// and `self` still keeps them to this origin and behind the platform's own permission
+		// prompt — nothing here grants access, it only stops the policy from refusing before the
+		// user is ever asked.
+		w.Header().Set("Permissions-Policy", "camera=(self), microphone=(self), geolocation=(self)")
+		w.Header().Set("Content-Security-Policy", s.contentSecurityPolicy)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// contentSecurityPolicy builds the page policy once at startup.
+//
+// blob: is required by the profile photo picker: the Mini App decodes the chosen file and
+// re-encodes it to JPEG in a canvas before upload, and that decode step loads a blob: URL. Without
+// it the browser blocks the image load and the upload never starts.
+//
+// connect-src additionally allows the ICE schemes in use. Engines disagree about whether the
+// directive governs an RTCPeerConnection's ICE servers, and a policy that silently blocked the
+// relay would look exactly like an ordinary NAT failure, so the schemes are permitted rather than
+// left to chance.
+//
+// Only the scheme is listed, never the full server URL: a CSP source is a scheme or a host, and
+// `stun:host:port` is neither — browsers discard such an entry as invalid, which would leave the
+// protection this line exists for silently absent.
+func contentSecurityPolicy(cfg config.Config) string {
+	connect := []string{"'self'"}
+	if cfg.Calls.Enabled {
+		for _, scheme := range iceSchemes(cfg.Calls.ICEHosts()) {
+			connect = append(connect, scheme)
+		}
+	}
+	return "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' https: data: blob:; media-src 'self' blob: mediastream:; " +
+		"connect-src " + strings.Join(connect, " ") + "; " +
+		"frame-ancestors https://web.telegram.org https://*.telegram.org"
+}
+
+// iceSchemes reduces ICE server URLs to their distinct `scheme:` prefixes, in a stable order.
+func iceSchemes(urls []string) []string {
+	seen := make(map[string]struct{}, 4)
+	schemes := make([]string, 0, 4)
+	for _, url := range urls {
+		scheme, _, found := strings.Cut(url, ":")
+		if !found || scheme == "" {
+			continue
+		}
+		if _, duplicate := seen[scheme]; duplicate {
+			continue
+		}
+		seen[scheme] = struct{}{}
+		schemes = append(schemes, scheme+":")
+	}
+	return schemes
 }
 
 func (s *Server) httpsOnly(next http.Handler) http.Handler {

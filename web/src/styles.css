@@ -81,6 +81,8 @@
   --z-toast: 40;
   --z-sheet: 60;
   --z-viewer: 80;
+  /* A call outranks everything: it can arrive while a sheet or the photo viewer is open. */
+  --z-call: 100;
 
   /* --- color ------------------------------------------------------------- */
   --bg: var(--tg-theme-bg-color, #0b0e14);
@@ -996,6 +998,37 @@ select {
   font-size: 26px;
   place-items: center;
 }
+.photo-slot-empty:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+/* An upload in progress and one that failed occupy the slot they were meant to fill, so the grid
+   never reflows and it is obvious which square the feedback belongs to. */
+.photo-slot-pending,
+.photo-slot-failed {
+  gap: var(--s-2);
+  border-style: dashed;
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  place-content: center;
+  place-items: center;
+  text-align: center;
+}
+.photo-slot-pending .spinner {
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  border-width: 2px;
+}
+.photo-slot-failed {
+  border-color: var(--danger-soft);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.photo-slot-failed span {
+  font-size: 22px;
+  font-weight: 800;
+}
 .photo-slot.is-fallback figcaption {
   position: absolute;
   right: 0;
@@ -1213,6 +1246,26 @@ select {
 .sheet-actions .primary-button {
   font-variant-numeric: tabular-nums;
 }
+/* The call button is a fixed-width icon so the like and message actions keep the proportions they
+   already had. */
+.sheet-actions.with-call {
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.3fr);
+}
+.call-invite {
+  display: grid;
+  width: var(--control-h);
+  min-height: var(--control-h);
+  border: 1px solid var(--gold-soft);
+  border-radius: var(--r-field);
+  background: var(--gold-soft);
+  color: var(--gold);
+  font-size: 18px;
+  place-items: center;
+}
+.call-invite:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
 
 /* --- message composer ----------------------------------------------------- */
 
@@ -1426,6 +1479,276 @@ select {
   color: #fff;
   font-size: 18px;
   place-items: center;
+}
+
+/* ==========================================================================
+   Video call
+
+   The call screen is the same kind of overlay as the photo viewer: fixed to the
+   live viewport, offset by --app-vv-top, and padded by the same --app-inset-*
+   values every other screen uses. It therefore inherits Telegram's fullscreen
+   geometry instead of asking for its own, and the app shell stays mounted and
+   untouched underneath it.
+   ========================================================================== */
+
+.call-screen {
+  position: fixed;
+  z-index: var(--z-call);
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: var(--app-live-height);
+  overflow: hidden;
+  background: #05070c;
+  color: #fff;
+  transform: translateY(var(--app-vv-top, 0px));
+  animation: fade-in 0.18s ease-out;
+  /* Nothing in a call scrolls, so the screen cannot rubber-band or drift under
+     Telegram's floating controls while the user is holding the phone. */
+  overscroll-behavior: none;
+  touch-action: none;
+}
+
+/* --- invitation states ---------------------------------------------------- */
+
+.call-prompt {
+  display: grid;
+  height: 100%;
+  padding: calc(var(--app-inset-top) + var(--s-6)) var(--page-r) calc(var(--app-inset-bottom) + var(--s-6)) var(--page-l);
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: var(--s-5);
+  justify-items: center;
+}
+.call-prompt-identity {
+  display: grid;
+  gap: var(--s-3);
+  align-content: center;
+  justify-items: center;
+  text-align: center;
+}
+.call-prompt-identity h2 {
+  font-size: var(--fs-h2);
+}
+.call-prompt-identity p {
+  max-width: 28ch;
+  color: rgba(255, 255, 255, 0.66);
+  font-size: var(--fs-label);
+}
+.call-pulse {
+  width: 46px;
+  height: 3px;
+  border-radius: var(--r-pill);
+  background: var(--gold);
+  animation: call-pulse 1.4s ease-in-out infinite;
+}
+@keyframes call-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+.call-prompt-actions {
+  display: flex;
+  width: 100%;
+  max-width: 360px;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--s-6);
+}
+.call-action {
+  display: grid;
+  gap: var(--s-2);
+  border: 0;
+  background: transparent;
+  color: #fff;
+  font-size: var(--fs-caption);
+  justify-items: center;
+}
+.call-action i {
+  display: grid;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  font-size: 24px;
+  font-style: normal;
+  line-height: 1;
+  place-items: center;
+}
+.call-action.accept i {
+  background: var(--success);
+  color: #06140d;
+}
+.call-action.decline i {
+  background: var(--danger);
+  color: #1a0508;
+}
+.call-action:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* --- live call ------------------------------------------------------------ */
+
+/* The remote stream owns the whole screen. object-fit:cover keeps a portrait
+   phone filled without letterboxing, which is what makes it read as a native
+   call rather than a video embedded in a page. */
+.call-remote {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #05070c;
+  object-fit: cover;
+}
+.call-remote-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+.call-unblock {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  padding: 12px var(--s-5);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: var(--r-pill);
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: var(--fs-label);
+  transform: translate(-50%, -50%);
+}
+
+.call-head {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  display: grid;
+  padding: calc(var(--app-inset-top) + var(--s-3)) var(--page-r) var(--s-4) var(--page-l);
+  background: linear-gradient(rgba(0, 0, 0, 0.6), transparent);
+  gap: 2px;
+  justify-items: center;
+  text-align: center;
+}
+.call-head strong {
+  overflow: hidden;
+  max-width: 100%;
+  font-size: var(--fs-h3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.call-head span {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: var(--fs-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The preview sits above the controls rather than beside them, so a thumb
+   reaching for End never covers it. */
+.call-local {
+  position: absolute;
+  right: calc(var(--page-r));
+  bottom: calc(var(--app-inset-bottom) + 104px);
+  display: grid;
+  width: clamp(88px, 26vw, 116px);
+  overflow: hidden;
+  aspect-ratio: 3 / 4;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 14px;
+  background: #10131b;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.call-local video {
+  width: 100%;
+  height: 100%;
+  grid-area: 1 / 1;
+  object-fit: cover;
+  /* The preview is mirrored, which is how every phone shows a front camera. */
+  transform: scaleX(-1);
+}
+.call-local.is-off video {
+  visibility: hidden;
+}
+.call-local span {
+  grid-area: 1 / 1;
+  align-self: center;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 22px;
+  justify-self: center;
+}
+
+.call-controls {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  padding: var(--s-5) var(--page-r) calc(var(--app-inset-bottom) + var(--s-5)) var(--page-l);
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.72) 55%);
+  gap: var(--s-4);
+  justify-content: center;
+}
+.call-control {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font-size: 20px;
+  place-items: center;
+  transition: background-color var(--t-fast) ease;
+}
+.call-control i {
+  font-style: normal;
+  line-height: 1;
+}
+.call-control.is-off {
+  background: #fff;
+  color: #05070c;
+}
+.call-control.end {
+  background: var(--danger);
+  color: #1a0508;
+}
+.call-control:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+/* Landscape and very short viewports: shrink the chrome rather than letting the
+   controls overlap the preview. */
+@media (max-height: 520px) {
+  .call-control {
+    width: 46px;
+    height: 46px;
+    font-size: 17px;
+  }
+  .call-controls {
+    padding-top: var(--s-3);
+    padding-bottom: calc(var(--app-inset-bottom) + var(--s-3));
+    gap: var(--s-3);
+  }
+  .call-local {
+    bottom: calc(var(--app-inset-bottom) + 76px);
+    width: clamp(70px, 18vw, 92px);
+  }
+  .call-action i {
+    width: 54px;
+    height: 54px;
+  }
+}
+
+/* Tablets and desktop clients: the call stays a phone-shaped column instead of
+   stretching a portrait stream across a wide window. */
+@media (min-width: 720px) {
+  .call-remote,
+  .call-remote-placeholder {
+    left: 50%;
+    width: min(100%, 520px);
+    transform: translateX(-50%);
+  }
 }
 
 /* ==========================================================================

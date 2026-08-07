@@ -12,8 +12,9 @@ Like and message *content* is delivered immediately through the Telegram Bot API
 - Telegram `initData` authentication on every protected API request
 - In-memory, per-sender one-minute like rate limiter
 - Database-authoritative, per-target 30-minute cooldown for likes and for messages, tracked separately
-- Up to three profile photos per user, stored per-owner on disk and mirrored into the profile avatar
+- Up to four profile photos per user, stored per-owner on disk and mirrored into the profile avatar
 - Two-second nearby refresh with entity-tag revalidation, so an unchanged neighbourhood costs a 304
+- One-to-one WebRTC video calls: signalling through the same authenticated HTTP API, media directly peer-to-peer
 
 SQLite `INTEGER` is a signed 64-bit value, so both `telegram_user_id` and `telegram_chat_id` retain Telegram's full numeric IDs. Internal profile IDs are random UUIDv4 strings.
 
@@ -100,9 +101,19 @@ Run only one AikaBot process against a SQLite file. Do not place the database on
 | `AUTH_MAX_AGE` | no | Maximum `initData` age, default `24h` |
 | `LIKE_RATE_PER_MINUTE` | no | Per-sender burst rate, default `5` |
 | `ACTION_COOLDOWN` | no | Per-target window for a like and, separately, for a message; default `30m` |
-| `MAX_PROFILE_PHOTOS` | no | Photos per user, default `3` |
+| `MAX_PROFILE_PHOTOS` | no | Photos per user, default `4` |
 | `WEB_DIR` | no | Built frontend directory, default `./web/dist` |
 | `APP_ENV` | no | Use `production` to require HTTPS |
+| `CALLS_ENABLED` | no | Video calling, default `true`; `false` hides the button and refuses every call route |
+| `CALL_INVITE_TIMEOUT` | no | Unanswered invitation lifetime, default `45s` |
+| `CALL_SETUP_TIMEOUT` | no | Accepted-but-never-connected lifetime, default `60s` |
+| `CALL_EVENT_WAIT` | no | Idle hold on a signalling request, default `20s` |
+| `CALL_PRESENCE_TIMEOUT` | no | Silence before a participant counts as gone, default `45s`; must exceed `CALL_EVENT_WAIT` |
+| `STUN_URLS` | no | Comma-separated STUN servers; defaults to Google's public ones |
+| `TURN_URLS` | no | Comma-separated TURN relays used only when no direct path exists |
+| `TURN_STATIC_AUTH_SECRET` | no | coturn `use-auth-secret`; the server mints an expiring credential per request |
+| `TURN_CREDENTIAL_TTL` | no | Lifetime of a minted TURN credential, default `1h` |
+| `TURN_USERNAME` / `TURN_PASSWORD` | no | One long-lived TURN account, used when no secret is set |
 | `LOCAL_DEV` and `DEV_TELEGRAM_*` | local only | Isolated browser-development identity |
 
 Never put the bot token, admin IDs, or database secrets in Vite variables or frontend code.
@@ -113,7 +124,11 @@ The onboarding form offers two native mobile actions: **choose from gallery** an
 
 Before upload, the Mini App scales the image to at most 1600 pixels on its longest side and converts it to JPEG. The authenticated server endpoint accepts one multipart `photo`, limits the request to 8 MB, allows only decodable JPEG/PNG images, and rejects excessive dimensions. It then decodes and re-encodes the image as JPEG, removing EXIF metadata such as embedded GPS coordinates.
 
-Each user may keep up to `MAX_PROFILE_PHOTOS` photos (default 3). The first photo in the gallery is the primary one: promoting or reordering photos rewrites `users.custom_photo_url` in the same transaction, so the avatar shown in lists, public profiles and Telegram notifications always matches `photos[0]`.
+Each user may keep up to `MAX_PROFILE_PHOTOS` photos (default 4). The first photo in the gallery is the primary one: promoting or reordering photos rewrites `users.custom_photo_url` in the same transaction, so the avatar shown in lists, public profiles and Telegram notifications always matches `photos[0]`.
+
+The editor always renders exactly `MAX_PROFILE_PHOTOS` square slots in a two-column grid, so the block keeps its height whether the profile has none or all of them. A slot is visibly one of: a stored photo, the primary photo (gold border and badge), an upload in progress, a failed upload that can be retried by tapping it, the read-only Telegram avatar shown when the gallery is still empty, or an empty slot. Order is changed with the per-slot arrows rather than a drag gesture: they are reliable under touch inside the Telegram WebView and cannot fight the surrounding scroll container. `PATCH /api/me/photos/order` must name exactly the caller's photo IDs, so a stale list or another account's ID is refused rather than applied.
+
+Nothing about four photos is a schema change — `user_photos.sort_order` was already an integer and the cap has always been configuration. Existing accounts with zero, one, two or three photos keep working untouched.
 
 Photos are atomically stored under the authenticated owner's directory, with a generated name and a small variant for list cards:
 
@@ -192,6 +207,14 @@ All `/api` routes except `POST /api/auth/telegram` require a valid authorization
 | `GET` | `/api/users/{uuid}/cooldowns` | The caller's own like/message deadlines towards that user, plus server time |
 | `POST` | `/api/users/{uuid}/like` | Send a like; `{}` is the like action, `{"message":"..."}` performs the message action instead |
 | `POST` | `/api/users/{uuid}/message` | Send a personal message of up to 300 characters |
+| `GET` | `/api/calls/config` | ICE servers, timeouts, and the caller's current call if one exists |
+| `GET` | `/api/calls/events?after=N` | Signalling channel; parked until an event is queued or `CALL_EVENT_WAIT` elapses |
+| `POST` | `/api/calls` | Invite `{"user_id":"…"}`; 409 when either side is busy |
+| `POST` | `/api/calls/{uuid}/accept` | Callee accepts a ringing call |
+| `POST` | `/api/calls/{uuid}/reject` | Callee declines a ringing call |
+| `POST` | `/api/calls/{uuid}/end` | Either side hangs up or cancels |
+| `POST` | `/api/calls/{uuid}/state` | Report `connected` or `failed` from the browser's peer connection |
+| `POST` | `/api/calls/{uuid}/signal` | Relay one `webrtc_offer`, `webrtc_answer` or `ice_candidate` to the other participant |
 | `GET` | `/api/admin/stats` | Admin-only aggregate statistics |
 | `GET` | `/api/admin/users?search=...` | Admin-only searchable user list without exact coordinates |
 | `GET` | `/health` | SQLite connectivity health check |
@@ -234,6 +257,86 @@ Each attempt claims its timer with a single `INSERT ... ON CONFLICT DO UPDATE ..
 The claim is taken *before* the Telegram notification is sent, so a duplicate that arrives while the first is still in flight is refused rather than delivered twice. If delivery then fails, the claim is released — matching the deadline it wrote, so a newer claim is never discarded — because an action that was never delivered should not cost the sender a full window.
 
 Deadlines are stored as Unix milliseconds and reported as RFC3339 server time. The Mini App measures its offset from the server clock and renders every countdown against that, so a wrong device clock cannot show a timer that disagrees with what the server will allow.
+
+## One-to-one video calls
+
+Audio and video travel directly between the two browsers over WebRTC. This process never sees a
+media frame; it only relays the control messages WebRTC cannot deliver by itself and decides who is
+allowed to send them.
+
+### Signalling
+
+`internal/calls` keeps the whole call state in memory: a call is a few seconds of coordination, not
+a record worth storing, so no SQLite row is written and a restart simply ends the calls that were in
+flight — which is what the browsers' own connections do anyway.
+
+Each online user has one mailbox with a monotonic cursor. `GET /api/calls/events?after=N` is parked
+on the server and flushed the *instant* an event is queued, so one signalling message costs one
+round trip; `CALL_EVENT_WAIT` is only how long an idle channel stays open before it renews. The
+handler extends its own write deadline past the server's `WriteTimeout` for exactly this reason.
+Everything in the other direction is an ordinary authenticated POST, so the channel reuses the
+Telegram `initData` header, the error envelope and the abortable polling loop the app already has.
+
+The state machine is `ringing → accepted → connected → ended`, with `ended` carrying one of
+`hangup`, `rejected`, `cancelled`, `timeout`, `failed` or `peer_disconnected`.
+
+### Authorization
+
+Identity always comes from the authenticated session. `POST /api/calls` names only the person being
+called; the caller is read from the request context and can never be spoofed. Every later action
+resolves the call and checks membership inside the registry, and a non-participant receives `404`
+rather than `403`, so live call IDs cannot be probed. Signalling names no recipient at all — the
+registry derives it from the call — so a client cannot address a stranger, and the sender never
+receives its own messages back. Offers are accepted only from the caller and answers only from the
+callee, and neither is relayed before the callee has actually accepted.
+
+A call is only offered to a profile that passes the same visibility rules as a like or a message,
+one active call per user is enforced by the registry rather than by the UI, and invitations are rate
+limited per account.
+
+### Devices and connection
+
+Nothing opens the camera or microphone until both sides have agreed: the invitation and the ringing
+screen use no device at all, and `getUserMedia` runs only after `accept`, through the platform's own
+permission prompt. The request asks for 720p as an *ideal*, not a demand, with echo cancellation,
+noise suppression and automatic gain control, and falls back to unconstrained capture if the device
+cannot satisfy it. WebRTC then adapts the encoding to the link for the rest of the call.
+
+ICE candidates are trickled as they are gathered rather than batched, and the peer connection uses a
+small candidate pool, so the first frame arrives as early as the network allows. `disconnected` is
+treated as a recoverable interruption, `failed` ends the call and tells the other side immediately
+instead of leaving it on a spinner.
+
+Ending a call — by button, by the peer, by a failure, or by leaving the screen — closes the
+`RTCPeerConnection`, stops every track, clears the listeners and timers and drops the streams, so
+the camera indicator goes out and the next call can open the device again.
+
+### STUN, TURN and what can still fail
+
+STUN alone is enough whenever both peers can be reached directly, which is the low-latency path this
+feature is built around. It is not universal: symmetric NAT, carrier-grade NAT, and many corporate,
+hotel and guest networks make a direct path impossible. Configure `TURN_URLS` for those, and ICE
+will use the relay only when no direct candidate pair works.
+
+**With no TURN server configured, calls on those networks will fail outright.** That is a property
+of NAT, not of this implementation.
+
+TURN credentials are never part of the frontend bundle. With `TURN_STATIC_AUTH_SECRET` the server
+mints an expiring `<unix-expiry>:<id>` username and its HMAC per authenticated request (coturn's
+`use-auth-secret` REST flow); the secret itself never leaves the server.
+
+### Telegram and platform limits
+
+- A Mini App can only ring a user who currently has it open. There is no push wake-up, and this
+  build sends no bot notification for a missed call.
+- Telegram must have OS-level camera and microphone permission itself; the in-page prompt cannot
+  grant what the container was denied.
+- A suspended WebView stops running JavaScript, so backgrounding the app for longer than
+  `CALL_PRESENCE_TIMEOUT` ends the call. The other side is told why.
+- Clients without `RTCPeerConnection` or `getUserMedia` never see a call button.
+- The response headers were adjusted for this feature: `Permissions-Policy` previously denied the
+  microphone outright, and `connect-src` now names the configured ICE servers because engines
+  disagree about whether that directive governs them.
 
 ## Production deployment
 

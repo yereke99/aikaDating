@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"aika/internal/auth"
+	"aika/internal/calls"
 	"aika/internal/config"
 	"aika/internal/database"
 	"aika/internal/domain"
@@ -32,6 +33,7 @@ type environment struct {
 	router http.Handler
 	store  *database.Store
 	photos *profilephoto.Store
+	calls  *calls.Registry
 	cfg    config.Config
 }
 
@@ -46,7 +48,12 @@ func testEnvironment(t *testing.T, devUserID, adminID int64, adjust ...func(*con
 		BotToken: "test", AuthMaxAge: time.Hour, LocalDev: true, DevUserID: devUserID,
 		DevFirstName: "Test", DevLanguageCode: "en", MiniAppOrigin: "http://localhost:5173",
 		AdminTelegramIDs: map[int64]struct{}{adminID: {}}, LikeRatePerMinute: 60,
-		ActionCooldown: 30 * time.Minute, MaxProfilePhotos: 3,
+		ActionCooldown: 30 * time.Minute, MaxProfilePhotos: 4,
+		Calls: config.CallConfig{
+			Enabled: true, InviteTimeout: 45 * time.Second, SetupTimeout: time.Minute,
+			EventWait: 50 * time.Millisecond, PresenceTimeout: 45 * time.Second,
+			STUNURLs: []string{"stun:stun.example.org:3478"}, TURNCredentialTTL: time.Hour,
+		},
 	}
 	for _, apply := range adjust {
 		apply(&cfg)
@@ -55,8 +62,13 @@ func testEnvironment(t *testing.T, devUserID, adminID int64, adjust ...func(*con
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := NewServer(cfg, store, users.NewService(store), auth.NewValidator(cfg), fakeTelegram{}, photos, zap.NewNop()).Router()
-	return environment{router: router, store: store, photos: photos, cfg: cfg}
+	registry := calls.NewRegistry(calls.Settings{
+		InviteTimeout:   cfg.Calls.InviteTimeout,
+		SetupTimeout:    cfg.Calls.SetupTimeout,
+		PresenceTimeout: cfg.Calls.PresenceTimeout,
+	})
+	router := NewServer(cfg, store, users.NewService(store), auth.NewValidator(cfg), fakeTelegram{}, photos, registry, zap.NewNop()).Router()
+	return environment{router: router, store: store, photos: photos, calls: registry, cfg: cfg}
 }
 
 func testServer(t *testing.T, devUserID, adminID int64) http.Handler {

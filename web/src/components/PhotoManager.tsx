@@ -4,7 +4,8 @@ import { MessageKey, translator } from '../i18n'
 import { haptic } from '../telegram'
 import type { Gallery, Language, Me, Photo } from '../types'
 
-const DEFAULT_MAX_PHOTOS = 3
+/** Only a fallback: the server sends the real cap with every gallery response. */
+const DEFAULT_MAX_PHOTOS = 4
 
 interface DecodedImage {
   source: CanvasImageSource
@@ -101,6 +102,10 @@ export function PhotoManager({
   const maxPhotos = me.max_photos ?? DEFAULT_MAX_PHOTOS
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // Upload feedback is per slot, not only a line of text: the grid shows which square is filling
+  // and which one refused.
+  const [uploading, setUploading] = useState(false)
+  const [failed, setFailed] = useState(false)
   const galleryInput = useRef<HTMLInputElement>(null)
   const cameraInput = useRef<HTMLInputElement>(null)
   // One in-flight mutation at a time: a double tap on "add" or two quick reorders cannot interleave
@@ -115,6 +120,7 @@ export function PhotoManager({
     pending.current = true
     setBusy(true)
     setError('')
+    setFailed(false)
     try {
       const gallery = await action()
       onGallery(gallery)
@@ -123,9 +129,11 @@ export function PhotoManager({
     } catch (caught) {
       haptic('error')
       setError(uploadMessage(caught, t))
+      setFailed(true)
     } finally {
       pending.current = false
       setBusy(false)
+      setUploading(false)
     }
   }
 
@@ -138,12 +146,18 @@ export function PhotoManager({
       haptic('error')
       return
     }
+    // The slot switches to its uploading state before the file is even decoded, so a large photo
+    // on a slow phone never looks like a tap that did nothing.
+    setUploading(true)
+    setFailed(false)
     let normalized: Blob
     try {
       normalized = await normalizeProfilePhoto(file)
     } catch {
       haptic('error')
       setError(t('unsupportedImage'))
+      setUploading(false)
+      setFailed(true)
       return
     }
     await run(() => api.addPhoto(normalized))
@@ -156,6 +170,11 @@ export function PhotoManager({
     ;[order[index], order[target]] = [order[target], order[index]]
     void run(() => api.reorderPhotos(order))
   }
+
+  // The grid always renders exactly maxPhotos squares, so the block never changes height between
+  // an empty profile and a full one and the rows can never end with an orphan tile.
+  const occupied = photos.length + (uploading || failed ? 1 : 0) + (fallbackPhoto ? 1 : 0)
+  const emptySlots = Math.max(0, maxPhotos - occupied)
 
   return (
     <div className="photo-manager">
@@ -173,6 +192,28 @@ export function PhotoManager({
             onMove={(direction) => move(index, direction)}
           />
         ))}
+        {uploading && (
+          <div className="photo-slot photo-slot-pending" role="status" aria-label={t('photoUploading')}>
+            <i className="spinner" aria-hidden="true" />
+            <small>{t('photoUploading')}</small>
+          </div>
+        )}
+        {!uploading && failed && (
+          <button
+            type="button"
+            className="photo-slot photo-slot-failed"
+            disabled={busy}
+            aria-label={t('photoFailed')}
+            onClick={() => {
+              setFailed(false)
+              setError('')
+              galleryInput.current?.click()
+            }}
+          >
+            <span aria-hidden="true">!</span>
+            <small>{t('photoFailed')}</small>
+          </button>
+        )}
         {fallbackPhoto && (
           // A Telegram avatar with no gallery photo yet: shown so the profile never looks empty,
           // and labelled so it is clear it is not one of the user's own photos.
@@ -181,13 +222,13 @@ export function PhotoManager({
             <figcaption>{t('telegramPhoto')}</figcaption>
           </figure>
         )}
-        {Array.from({ length: Math.max(0, slots) }, (_, index) => (
+        {Array.from({ length: emptySlots }, (_, index) => (
           <button
             key={`empty-${index}`}
             type="button"
             className="photo-slot photo-slot-empty"
-            disabled={busy}
-            aria-label={t('addPhoto')}
+            disabled={busy || slots <= 0}
+            aria-label={`${t('addPhoto')} — ${t('emptySlot')} ${photos.length + index + 1}`}
             onClick={() => galleryInput.current?.click()}
           >
             <span aria-hidden="true">+</span>

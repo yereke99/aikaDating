@@ -1,6 +1,8 @@
 import { FormEvent, memo, useCallback, useEffect, useRef, useState } from 'react'
 import { APIError, api, setAuthorization } from './api'
+import { useCallCenter } from './calls/useCallCenter'
 import { Avatar } from './components/Avatar'
+import { CallScreen } from './components/CallScreen'
 import { DateField } from './components/DateField'
 import { MessageSheet } from './components/MessageSheet'
 import { PhotoCarousel, PhotoViewer } from './components/PhotoCarousel'
@@ -488,6 +490,8 @@ function PublicProfileSheet({
   onClose,
   onMessage,
   onLike,
+  onCall,
+  callBusy,
 }: {
   profile: PublicProfile
   language: Language
@@ -495,6 +499,9 @@ function PublicProfileSheet({
   onClose: () => void
   onMessage: () => void
   onLike: () => void
+  /** Absent when the client or the deployment cannot do video calls, which hides the button. */
+  onCall?: () => void
+  callBusy?: boolean
 }) {
   const t = translator(language)
   const [viewer, setViewer] = useState(false)
@@ -547,7 +554,14 @@ function PublicProfileSheet({
           )}
         </SheetBody>
         <SheetFoot>
-          <div className="sheet-actions">
+          <div className={`sheet-actions${onCall ? ' with-call' : ''}`}>
+            {onCall && (
+              // Disabled only while the invitation request is in flight, so a double tap cannot
+              // open two calls.
+              <button type="button" className="call-invite" disabled={callBusy} onClick={onCall} aria-label={t('videoCall')} title={t('videoCall')}>
+                <span aria-hidden="true">▷</span>
+              </button>
+            )}
             <button className="secondary-button" disabled={likeLeft > 0} onClick={onLike}>
               ♥ {likeLeft > 0 ? formatRemaining(likeLeft) : t('like')}
             </button>
@@ -568,12 +582,16 @@ function Nearby({
   notify,
   initialProfile,
   clearInitialProfile,
+  onCall,
+  callBusy,
 }: {
   me: Me
   onLocation: () => void
   notify: (text: string) => void
   initialProfile: PublicProfile | null
   clearInitialProfile: () => void
+  onCall?: (profile: PublicProfile) => void
+  callBusy?: boolean
 }) {
   const t = translator(me.app_language)
   const [radius, setRadius] = useState(20)
@@ -759,6 +777,8 @@ function Nearby({
             clearInitialProfile()
           }}
           onLike={() => void sendLike(openProfile)}
+          onCall={onCall && (() => onCall(openProfile))}
+          callBusy={callBusy}
           onMessage={() => {
             setMessageTarget(openProfile)
             setOpenProfile(null)
@@ -1011,6 +1031,14 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => setToast(''), 2600)
   }, [])
 
+  // Calls live above the whole app rather than inside a tab: the signalling channel has to be
+  // listening wherever the user is, and the call screen has to survive whatever is on screen
+  // underneath it. It only starts once the profile is complete, because an incomplete profile can
+  // neither place nor receive a call.
+  const language = me?.app_language ?? 'ru'
+  const translate = useCallback((key: MessageKey) => translator(language)(key), [language])
+  const calls = useCallCenter(me?.is_profile_completed ? me.id : undefined, notify, translate)
+
   if (status === 'loading') return <FullPageState loading title="AikaBot" />
   if (status === 'error' || !me)
     return <FullPageState icon="!" title="AikaBot" body={error} action={() => window.location.reload()} actionLabel={translator('ru')('retry')} />
@@ -1057,6 +1085,8 @@ export default function App() {
               notify={notify}
               initialProfile={deepProfile}
               clearInitialProfile={() => setDeepProfile(null)}
+              onCall={calls.enabled ? (profile) => calls.start(profile.id) : undefined}
+              callBusy={calls.busy || calls.phase !== 'idle'}
               onLocation={() => setMe({ ...me, location_available: true })}
             />
           )}
@@ -1108,6 +1138,9 @@ export default function App() {
           ))}
         </div>
       </nav>
+      {/* Rendered last and outside the scroller: it covers the shell without unmounting it, so
+          ending a call returns to the exact tab and scroll position the user left. */}
+      <CallScreen call={calls} language={me.app_language} />
     </div>
   )
 }

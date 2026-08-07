@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"aika/internal/auth"
+	"aika/internal/calls"
 	"aika/internal/config"
 	"aika/internal/database"
 	"aika/internal/httpapi"
@@ -49,7 +50,14 @@ func main() {
 	telegramClient := telegram.NewClient(cfg.BotToken, cfg.MiniAppURL, cfg.BotUsername, store, log)
 	validator := auth.NewValidator(cfg)
 	userService := users.NewService(store)
-	api := httpapi.NewServer(cfg, store, userService, validator, telegramClient, photos, log)
+	// Video call signalling is in-memory state, not stored data: a call is a few seconds of
+	// coordination between two browsers that then exchange media directly.
+	callRegistry := calls.NewRegistry(calls.Settings{
+		InviteTimeout:   cfg.Calls.InviteTimeout,
+		SetupTimeout:    cfg.Calls.SetupTimeout,
+		PresenceTimeout: cfg.Calls.PresenceTimeout,
+	})
+	api := httpapi.NewServer(cfg, store, userService, validator, telegramClient, photos, callRegistry, log)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -62,6 +70,9 @@ func main() {
 	}
 
 	go telegramClient.Run(rootContext)
+	if cfg.Calls.Enabled {
+		go callRegistry.Run(rootContext)
+	}
 	serverErrors := make(chan error, 1)
 	go func() {
 		log.Info("AikaBot HTTP server started", zap.String("port", cfg.Port))

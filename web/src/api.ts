@@ -1,3 +1,4 @@
+import type { CallConfig, CallEventsResponse, CallResponse, SignalPayload } from './calls/types'
 import { syncServerTime } from './lib/cooldown'
 import type { ActionResult, AdminStats, AdminUser, CooldownsResponse, Gallery, Me, NearbyPage, ProfileInput, PublicProfile } from './types'
 
@@ -117,6 +118,24 @@ export const api = {
   like: (id: string) => request<ActionResult>(`/api/users/${encodeURIComponent(id)}/like`, { method: 'POST', body: JSON.stringify({}) }),
   message: (id: string, message: string) =>
     request<ActionResult>(`/api/users/${encodeURIComponent(id)}/message`, { method: 'POST', body: JSON.stringify({ message }) }),
+
+  // --- one-to-one video calls ---------------------------------------------------------------
+  // Only signalling passes through these; the audio and video go directly between the two
+  // browsers over WebRTC.
+  callConfig: () => request<CallConfig>('/api/calls/config'),
+  /**
+   * The signalling channel. The server parks this request and answers the instant an event is
+   * queued, so a message costs one round trip rather than a poll interval.
+   */
+  callEvents: (after: number, signal?: AbortSignal) => request<CallEventsResponse>(`/api/calls/events?after=${after}`, { signal }),
+  createCall: (userID: string) => request<CallResponse>('/api/calls', { method: 'POST', body: JSON.stringify({ user_id: userID }) }),
+  acceptCall: (callID: string) => request<CallResponse>(`/api/calls/${encodeURIComponent(callID)}/accept`, { method: 'POST' }),
+  rejectCall: (callID: string) => request<CallResponse>(`/api/calls/${encodeURIComponent(callID)}/reject`, { method: 'POST' }),
+  endCall: (callID: string) => request<CallResponse>(`/api/calls/${encodeURIComponent(callID)}/end`, { method: 'POST' }),
+  callState: (callID: string, state: 'connected' | 'failed') =>
+    request<CallResponse>(`/api/calls/${encodeURIComponent(callID)}/state`, { method: 'POST', body: JSON.stringify({ state }) }),
+  signalCall: (callID: string, payload: SignalPayload) =>
+    request<{ success: boolean }>(`/api/calls/${encodeURIComponent(callID)}/signal`, { method: 'POST', body: JSON.stringify(payload) }),
 
   adminStats: () => request<AdminStats>('/api/admin/stats'),
   adminUsers: (search: string) =>
